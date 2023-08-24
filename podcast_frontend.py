@@ -25,19 +25,23 @@ def main():
         
         #Extract the list of episodes for the given podcast
         podcast_feed = feedparser.parse(podcast_url)
-    
+
+        for pod in podcast_feed.entries[:5]:
+          pods.update({pod['title']:[pod['links'][0]['href'],pod['image']['href']]})
+            
         #Get the most recent 5 episodes
-        podcast_ten_titles = dict([(pod['title_detail']['value'],pod['title_detail']['href']) for pod in podcast_feed.entries[:5]])
+        podcast_five_titles = list(pods.keys())
 
     # Dropdown box
     st.sidebar.subheader("Available Podcasts Feeds")
-    selected_podcast = st.sidebar.selectbox("Select Podcast", options=list(podcast_ten_titles.keys))
+    selected_podcast = st.sidebar.selectbox("Select Podcast", options=podcast_five_titles)
 
     if selected_podcast:
 
         st.sidebar.markdown("**Note**: Podcast processing can take upto 5 mins, please be patient.")
         
-        podcast_link = podcast_ten_titles[selected_podcast]
+        podcast_link = pods[selected_podcast][0]
+        podcast_image = pods[selected_podcast][1] 
 
         # Right section - Newsletter content
         st.header("Newsletter Content")
@@ -58,7 +62,7 @@ def main():
             st.write(podcast_info['podcast_summary'])
 
         with col2:
-            st.image(podcast_info['podcast_details']['episode_image'], caption="Podcast Cover", width=300, use_column_width=True)
+            st.image(podcast_image, caption="Podcast Cover", width=300, use_column_width=True)
 
         # Display the podcast guest and their details in a side-by-side layout
         col3, col4 = st.columns([3, 7])

@@ -32,9 +32,9 @@ def main():
         #Get the most recent 5 episodes
         podcast_five_titles = list(pods.keys())
 
-    # Dropdown box
-    st.sidebar.subheader("Available Podcasts Feeds")
-    selected_podcast = st.sidebar.selectbox("Select Podcast", options=podcast_five_titles)
+        # Dropdown box
+        st.sidebar.subheader("Available Podcasts Feeds")
+        selected_podcast = st.sidebar.selectbox("Select Podcast", options=podcast_five_titles)
 
     if selected_podcast:
 

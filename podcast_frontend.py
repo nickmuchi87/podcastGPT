@@ -15,7 +15,7 @@ def main():
     st.sidebar.header("Podcast RSS Feeds")
 
     # Input Box
-    podcast_url = st.sidebar.input_text('Please paste the podcast RSS feed link here')
+    podcast_url = st.sidebar.text_input('Please paste the podcast RSS feed link here')
 
     latest_ep_button = st.sidebar.button("Get latest 5 Episodes")
     

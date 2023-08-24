@@ -3,17 +3,14 @@ import modal
 import json
 import os
 
-!pip install feedparser
-
-import feedparser
 
 # podcast_feed_url = "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/8a94442e-5a74-4fa2-8b8d-ae27003a8d6b/982f5071-765c-403d-969d-ae27003a8d83/podcast.rss"
 
 def main():
     st.title("PodcastGPT Dashboard")
 
-    # available_podcast_info = create_dict_from_json_files('.')
-
+    import feedparser
+    
     # Left section - Input fields
     st.sidebar.header("Podcast RSS Feeds")
 

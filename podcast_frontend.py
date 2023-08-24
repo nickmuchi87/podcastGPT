@@ -36,51 +36,51 @@ def main():
         st.sidebar.subheader("Available Podcasts Feeds")
         selected_podcast = st.sidebar.selectbox("Select Podcast", options=podcast_five_titles)
 
-    if selected_podcast:
-
-        st.sidebar.markdown("**Note**: Podcast processing can take upto 5 mins, please be patient.")
-        
-        podcast_link = pods[selected_podcast][0]
-        podcast_image = pods[selected_podcast][1] 
-
-        # Right section - Newsletter content
-        st.header("Newsletter Content")
-
-        # Display the podcast title
-        st.subheader("Episode Title")
-        st.write(selected_podcast)
-
-        # Display the podcast summary and the cover image in a side-by-side layout
-        col1, col2 = st.columns([7, 3])
-
-        # Get podcast transcription and info
-        podcast_info = process_podcast_info(podcast_link)
-        
-        with col1:
-            # Display the podcast episode summary
-            st.subheader("Podcast Episode Summary")
-            st.write(podcast_info['podcast_summary'])
-
-        with col2:
-            st.image(podcast_image, caption="Podcast Cover", width=300, use_column_width=True)
-
-        # Display the podcast guest and their details in a side-by-side layout
-        col3, col4 = st.columns([3, 7])
-
-        with col3:
-            st.subheader("Podcast Guest")
-            st.write(podcast_info['podcast_guest']['name'])
-
-        with col4:
-            st.subheader("Podcast Guest Details")
-            st.write(podcast_info["podcast_guest"]['summary'])
-
-        # Display the five key moments
-        st.subheader("Key Moments")
-        key_moments = podcast_info['podcast_highlights']
-        for moment in key_moments.split('\n'):
-            st.markdown(
-                f"<p style='margin-bottom: 5px;'>{moment}</p>", unsafe_allow_html=True)
+        if selected_podcast:
+    
+            st.sidebar.markdown("**Note**: Podcast processing can take upto 5 mins, please be patient.")
+            
+            podcast_link = pods[selected_podcast][0]
+            podcast_image = pods[selected_podcast][1] 
+    
+            # Right section - Newsletter content
+            st.header("Newsletter Content")
+    
+            # Display the podcast title
+            st.subheader("Episode Title")
+            st.write(selected_podcast)
+    
+            # Display the podcast summary and the cover image in a side-by-side layout
+            col1, col2 = st.columns([7, 3])
+    
+            # Get podcast transcription and info
+            podcast_info = process_podcast_info(podcast_link)
+            
+            with col1:
+                # Display the podcast episode summary
+                st.subheader("Podcast Episode Summary")
+                st.write(podcast_info['podcast_summary'])
+    
+            with col2:
+                st.image(podcast_image, caption="Podcast Cover", width=300, use_column_width=True)
+    
+            # Display the podcast guest and their details in a side-by-side layout
+            col3, col4 = st.columns([3, 7])
+    
+            with col3:
+                st.subheader("Podcast Guest")
+                st.write(podcast_info['podcast_guest']['name'])
+    
+            with col4:
+                st.subheader("Podcast Guest Details")
+                st.write(podcast_info["podcast_guest"]['summary'])
+    
+            # Display the five key moments
+            st.subheader("Key Moments")
+            key_moments = podcast_info['podcast_highlights']
+            for moment in key_moments.split('\n'):
+                st.markdown(
+                    f"<p style='margin-bottom: 5px;'>{moment}</p>", unsafe_allow_html=True)
 
 
 def process_podcast_info(url):

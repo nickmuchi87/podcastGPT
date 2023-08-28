@@ -27,7 +27,19 @@ def main():
         podcast_feed = feedparser.parse(podcast_url)
 
         for pod in podcast_feed.entries[:5]:
-          pods.update({pod['title']:[pod['links'][0]['href'],pod['image']['href']]})
+            podcast_title = pod['title']
+        
+            try:
+                podcast_image = pod['image']['href']
+        
+            except:
+                podcast_image = ''
+        
+            for i in pod['links']:
+                if i['type'] == 'audio/mpeg':
+                    podcast_url = i['href']
+
+            pods.update({pod['title']:[podcast_url,podcast_image]})
             
         #Get the most recent 5 episodes
         podcast_five_titles = list(pods.keys())

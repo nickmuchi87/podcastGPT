@@ -72,9 +72,10 @@ def main():
                 # Display the podcast episode summary
                 st.subheader("Podcast Episode Summary")
                 st.write(podcast_info['podcast_summary'])
-    
-            with col2:
-                st.image(podcast_image, caption="Podcast Cover", width=300, use_column_width=True)
+
+            if podcast_image:
+                with col2:
+                    st.image(podcast_image, caption="Podcast Cover", width=300, use_column_width=True)
     
             # Display the podcast guest and their details in a side-by-side layout
             col3, col4 = st.columns([3, 7])

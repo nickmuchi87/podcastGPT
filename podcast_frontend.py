@@ -23,7 +23,7 @@ def main():
 
     with col2:
 
-        st.image('RSS_copy.png',caption=','Copy RSS Link')
+        st.image('RSS_copy.png',caption='Copy RSS Link')
 
     st.markdown(
     """

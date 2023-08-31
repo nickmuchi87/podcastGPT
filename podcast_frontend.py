@@ -9,6 +9,20 @@ import feedparser
 def main():
     st.title("PodcastGPT Dashboard")
 
+    st.markdown(
+    """
+    This app assists busy professionals with transcribing and summarizing Podcasts from [Listen Notes](https://www.listennotes.com/) website by following the below steps:
+    - Search for your desired podcast from the Listen Notes website and click on the "RSS" tab to generate a unique link to the podcast. Example shown below: 
+"""
+)
+    st.image(RSS.png, caption = 'Example')
+
+    st.markdown(
+    """
+    - Copy yhe generated link and paste in the sidebar on the left: 
+"""
+)
+
     pods = {}
     
     # Left section - Input fields

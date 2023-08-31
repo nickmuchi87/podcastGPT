@@ -15,11 +15,19 @@ def main():
     - Search for your desired podcast from the Listen Notes website and click on the "RSS" tab to generate a unique link to the podcast. Example shown below: 
 """
 )
-    st.image(RSS.png, caption = 'Example')
+    col1, col22 = st.columns(2)
+    
+    with col1:
+        
+        st.image('RSS.png', caption = 'Click RSS')
+
+    with col2:
+
+        st.image('RSS_copy.png',caption=','Copy RSS Link')
 
     st.markdown(
     """
-    - Copy yhe generated link and paste in the sidebar on the left: 
+    - Copy the generated link and paste in the sidebar on the left: 
 """
 )
 

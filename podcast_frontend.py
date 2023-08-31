@@ -15,7 +15,7 @@ def main():
     - Search for your desired podcast from the Listen Notes website and click on the "RSS" tab to generate a unique link to the podcast. Example shown below: 
 """
 )
-    col1, col22 = st.columns(2)
+    col1, col2 = st.columns(2)
     
     with col1:
         

@@ -121,7 +121,7 @@ def main():
 
 def process_podcast_info(url):
     f = modal.Function.lookup("corise-podcast-project", "process_podcast")
-    output = f.call(url, '/content/')
+    output = f.remote(url, '/content/')
     return output
 
 if __name__ == '__main__':

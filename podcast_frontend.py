@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, List
 import time
 import tempfile
 from openai import OpenAI
+from pydub import AudioSegment
 
 # ============================================================================
 # Configuration & Constants
@@ -544,24 +545,23 @@ def get_openai_client() -> Optional[OpenAI]:
     return None
 
 
-def download_audio(audio_url: str, max_size_mb: int = 25) -> Optional[str]:
+def download_audio(audio_url: str) -> Optional[str]:
     """Download audio file to a temporary location."""
     try:
         headers = {'User-Agent': 'PodcastGPT/1.0'}
-        response = requests.get(audio_url, headers=headers, stream=True, timeout=60)
+        response = requests.get(audio_url, headers=headers, stream=True, timeout=120)
         response.raise_for_status()
 
-        # Check content length if available
-        content_length = response.headers.get('content-length')
-        if content_length and int(content_length) > max_size_mb * 1024 * 1024:
-            return None  # File too large
-
-        # Save to temp file
-        suffix = '.mp3'
-        if 'audio/mp4' in response.headers.get('content-type', ''):
+        # Determine file type from content-type or URL
+        content_type = response.headers.get('content-type', '')
+        if 'audio/mp4' in content_type or 'm4a' in audio_url:
             suffix = '.m4a'
-        elif 'audio/wav' in response.headers.get('content-type', ''):
+        elif 'audio/wav' in content_type:
             suffix = '.wav'
+        elif 'audio/ogg' in content_type:
+            suffix = '.ogg'
+        else:
+            suffix = '.mp3'
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             for chunk in response.iter_content(chunk_size=8192):
@@ -573,25 +573,85 @@ def download_audio(audio_url: str, max_size_mb: int = 25) -> Optional[str]:
         return None
 
 
-def transcribe_audio(client: OpenAI, audio_path: str) -> Optional[str]:
-    """Transcribe audio using OpenAI Whisper."""
+def split_audio_into_chunks(audio_path: str, chunk_duration_ms: int = 600000) -> List[str]:
+    """
+    Split audio file into chunks for Whisper API (25MB limit).
+    Default chunk is 10 minutes (600000ms) which typically stays under 25MB.
+    """
+    chunk_paths = []
     try:
-        with open(audio_path, 'rb') as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="text"
-            )
-        return transcript
-    except Exception as e:
-        st.error(f"Transcription failed: {str(e)[:100]}")
-        return None
-    finally:
-        # Clean up temp file
+        # Load audio file
+        audio = AudioSegment.from_file(audio_path)
+        total_duration = len(audio)
+
+        # If audio is short enough, return as-is
+        if total_duration <= chunk_duration_ms:
+            return [audio_path]
+
+        # Split into chunks
+        num_chunks = (total_duration // chunk_duration_ms) + 1
+        st.info(f"Audio is {total_duration // 60000} minutes - splitting into {num_chunks} chunks...")
+
+        for i in range(0, total_duration, chunk_duration_ms):
+            chunk = audio[i:i + chunk_duration_ms]
+
+            # Export chunk to temp file
+            chunk_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3').name
+            chunk.export(chunk_path, format='mp3', bitrate='64k')
+            chunk_paths.append(chunk_path)
+
+        # Clean up original file
         try:
             os.unlink(audio_path)
         except:
             pass
+
+        return chunk_paths
+
+    except Exception as e:
+        st.error(f"Failed to split audio: {str(e)[:100]}")
+        # Return original file if splitting fails
+        return [audio_path] if os.path.exists(audio_path) else []
+
+
+def transcribe_audio(client: OpenAI, audio_path: str) -> Optional[str]:
+    """Transcribe audio using OpenAI Whisper with chunking support."""
+    chunk_paths = []
+    try:
+        # Split audio into chunks if needed
+        chunk_paths = split_audio_into_chunks(audio_path)
+
+        if not chunk_paths:
+            st.error("No audio chunks to transcribe")
+            return None
+
+        # Transcribe each chunk
+        transcripts = []
+        for i, chunk_path in enumerate(chunk_paths):
+            if len(chunk_paths) > 1:
+                st.info(f"Transcribing chunk {i + 1}/{len(chunk_paths)}...")
+
+            with open(chunk_path, 'rb') as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="text"
+                )
+            transcripts.append(transcript)
+
+        # Combine all transcripts
+        return " ".join(transcripts)
+
+    except Exception as e:
+        st.error(f"Transcription failed: {str(e)[:100]}")
+        return None
+    finally:
+        # Clean up all temp files
+        for path in chunk_paths:
+            try:
+                os.unlink(path)
+            except:
+                pass
 
 
 def generate_em_summary(client: OpenAI, transcript: str) -> Dict[str, Any]:

@@ -572,7 +572,6 @@ def extract_listennotes_transcript(url: str) -> Optional[str]:
         # Listen Notes embeds transcript in JSON-LD or specific div elements
 
         # Method 1: Check for transcript in JSON-LD schema
-        import re
         json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
         json_ld_matches = re.findall(json_ld_pattern, html, re.DOTALL)
 
@@ -606,6 +605,43 @@ def extract_listennotes_transcript(url: str) -> Optional[str]:
                 clean_text = re.sub(r'\s+', ' ', clean_text).strip()
                 if len(clean_text) > 500:  # Likely a real transcript
                     return clean_text
+
+        return None
+
+    except Exception as e:
+        return None
+
+
+def search_listennotes_for_episode(podcast_name: str, episode_title: str) -> Optional[str]:
+    """
+    Search Listen Notes for an episode and return the episode page URL.
+    Returns None if not found.
+    """
+    try:
+        # Clean up search query
+        query = f"{podcast_name} {episode_title}"
+        # Remove special characters that might break search
+        query = re.sub(r'[^\w\s]', ' ', query)
+        query = ' '.join(query.split()[:10])  # Limit to first 10 words
+
+        search_url = f"https://www.listennotes.com/search/?q={requests.utils.quote(query)}&type=episode"
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        html = response.text
+
+        # Look for episode links in search results
+        # Listen Notes episode URLs look like: /podcasts/podcast-name/episode-title-XXXXX/
+        episode_pattern = r'href="(/podcasts/[^"]+/[^"]+/)"'
+        matches = re.findall(episode_pattern, html)
+
+        if matches:
+            # Return the first match (most relevant)
+            episode_path = matches[0]
+            return f"https://www.listennotes.com{episode_path}"
 
         return None
 
@@ -811,7 +847,8 @@ Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates
         }
 
 
-def process_podcast(audio_url: str, episode_page_url: Optional[str] = None) -> Dict[str, Any]:
+def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
+                    podcast_name: Optional[str] = None, episode_title: Optional[str] = None) -> Dict[str, Any]:
     """Process a podcast episode using OpenAI (Whisper + GPT).
 
     First checks for existing transcript on podcast platforms (Listen Notes, etc.).
@@ -834,8 +871,23 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None) -> D
     transcript = None
 
     # Step 1: Try to find existing transcript (free and instant)
-    if episode_page_url:
-        st.info("Checking for existing transcript...")
+    # First, check if we have a Listen Notes URL
+    if episode_page_url and 'listennotes.com' in episode_page_url.lower():
+        st.info("Checking Listen Notes for transcript...")
+        transcript = extract_transcript_from_episode_page(episode_page_url)
+
+    # If no Listen Notes URL provided, try to search for the episode
+    if not transcript and podcast_name and episode_title:
+        st.info("Searching Listen Notes for episode...")
+        ln_url = search_listennotes_for_episode(podcast_name, episode_title)
+        if ln_url:
+            st.info(f"Found on Listen Notes, checking for transcript...")
+            transcript = extract_listennotes_transcript(ln_url)
+            if transcript:
+                st.success("Found transcript on Listen Notes!")
+
+    # Try the provided URL if it's not Listen Notes (maybe has transcript)
+    if not transcript and episode_page_url and 'listennotes.com' not in episode_page_url.lower():
         transcript = extract_transcript_from_episode_page(episode_page_url)
 
     # Step 2: Fall back to Whisper transcription if no existing transcript
@@ -1755,7 +1807,15 @@ def main():
                         episode_info.get('link') or
                         episode_info.get('page_url')
                     )
-                    result = process_podcast(audio_url, episode_page_url)
+                    # Pass podcast and episode names for auto-search
+                    podcast_name = episode_info.get('podcast_title', '')
+                    episode_title = st.session_state.selected_episode
+                    result = process_podcast(
+                        audio_url,
+                        episode_page_url,
+                        podcast_name,
+                        episode_title
+                    )
                     # Clear the Listen Notes URL after processing
                     st.session_state.episode_listennotes_url = None
                     st.session_state.last_result = result

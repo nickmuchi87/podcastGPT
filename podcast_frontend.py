@@ -349,13 +349,17 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
             # Get published date
             published = item.findtext('pubDate', '')
 
+            # Get episode page URL (useful for transcript extraction)
+            episode_link = item.findtext('link', '')
+
             if audio_url:  # Only add if we have an audio URL
                 episodes[title] = {
                     'audio_url': audio_url,
                     'image': episode_image,
                     'description': description,
                     'published': published,
-                    'podcast_title': podcast_title
+                    'podcast_title': podcast_title,
+                    'link': episode_link
                 }
 
         if not episodes:
@@ -545,6 +549,84 @@ def get_openai_client() -> Optional[OpenAI]:
     return None
 
 
+def extract_listennotes_transcript(url: str) -> Optional[str]:
+    """
+    Try to extract transcript from Listen Notes episode page.
+    Only ~1% of episodes have transcripts, so this often returns None.
+    """
+    if 'listennotes.com' not in url.lower():
+        return None
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        html = response.text
+
+        # Look for transcript in various possible locations
+        # Listen Notes embeds transcript in JSON-LD or specific div elements
+
+        # Method 1: Check for transcript in JSON-LD schema
+        import re
+        json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
+        json_ld_matches = re.findall(json_ld_pattern, html, re.DOTALL)
+
+        for match in json_ld_matches:
+            try:
+                data = json.loads(match)
+                if isinstance(data, dict):
+                    # Check for transcript field
+                    if 'transcript' in data:
+                        return data['transcript']
+                    # Check in associatedMedia
+                    if 'associatedMedia' in data:
+                        media = data['associatedMedia']
+                        if isinstance(media, dict) and 'transcript' in media:
+                            return media['transcript']
+            except json.JSONDecodeError:
+                continue
+
+        # Method 2: Look for transcript div/section
+        transcript_patterns = [
+            r'<div[^>]*class="[^"]*transcript[^"]*"[^>]*>(.*?)</div>',
+            r'<section[^>]*id="transcript"[^>]*>(.*?)</section>',
+            r'"transcript"\s*:\s*"([^"]+)"',
+        ]
+
+        for pattern in transcript_patterns:
+            matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                # Clean HTML tags
+                clean_text = re.sub(r'<[^>]+>', ' ', match)
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                if len(clean_text) > 500:  # Likely a real transcript
+                    return clean_text
+
+        return None
+
+    except Exception as e:
+        return None
+
+
+def extract_transcript_from_episode_page(episode_url: str) -> Optional[str]:
+    """
+    Try to extract transcript from various podcast platforms.
+    Returns transcript text if found, None otherwise.
+    """
+    # Try Listen Notes
+    if 'listennotes.com' in episode_url.lower():
+        transcript = extract_listennotes_transcript(episode_url)
+        if transcript:
+            st.success("Found existing transcript on Listen Notes!")
+            return transcript
+
+    # Could add more platforms here (Spotify, Apple, etc.)
+
+    return None
+
+
 def download_audio(audio_url: str) -> Optional[str]:
     """Download audio file to a temporary location."""
     try:
@@ -726,8 +808,12 @@ Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates
         }
 
 
-def process_podcast(audio_url: str) -> Dict[str, Any]:
-    """Process a podcast episode using OpenAI (Whisper + GPT)."""
+def process_podcast(audio_url: str, episode_page_url: Optional[str] = None) -> Dict[str, Any]:
+    """Process a podcast episode using OpenAI (Whisper + GPT).
+
+    First checks for existing transcript on podcast platforms (Listen Notes, etc.).
+    Falls back to Whisper transcription if no transcript is found.
+    """
 
     # Check for OpenAI API key
     client = get_openai_client()
@@ -742,33 +828,42 @@ def process_podcast(audio_url: str) -> Dict[str, Any]:
             "_is_fallback": True
         }
 
-    # Download audio
-    st.info("Downloading podcast audio...")
-    audio_path = download_audio(audio_url)
-    if not audio_path:
-        return {
-            "podcast_summary": "Failed to download podcast audio. The file may be too large (>25MB) or the URL may be inaccessible.",
-            "podcast_guest": "N/A",
-            "podcast_guest_title": "Download failed",
-            "podcast_guest_org": "",
-            "podcast_highlights": "• Check if the audio URL is accessible\n• Try a shorter episode\n• Use Demo Mode for sample analysis",
-            "podcast_details": "",
-            "_is_fallback": True
-        }
+    transcript = None
 
-    # Transcribe with Whisper
-    st.info("Transcribing with OpenAI Whisper...")
-    transcript = transcribe_audio(client, audio_path)
+    # Step 1: Try to find existing transcript (free and instant)
+    if episode_page_url:
+        st.info("Checking for existing transcript...")
+        transcript = extract_transcript_from_episode_page(episode_page_url)
+
+    # Step 2: Fall back to Whisper transcription if no existing transcript
     if not transcript:
-        return {
-            "podcast_summary": "Transcription failed. The audio format may not be supported or there was an API error.",
-            "podcast_guest": "N/A",
-            "podcast_guest_title": "Transcription failed",
-            "podcast_guest_org": "",
-            "podcast_highlights": "• Check OpenAI API status\n• Verify API key has Whisper access\n• Try a different episode",
-            "podcast_details": "",
-            "_is_fallback": True
-        }
+        # Download audio
+        st.info("Downloading podcast audio...")
+        audio_path = download_audio(audio_url)
+        if not audio_path:
+            return {
+                "podcast_summary": "Failed to download podcast audio. The file may be too large or the URL may be inaccessible.",
+                "podcast_guest": "N/A",
+                "podcast_guest_title": "Download failed",
+                "podcast_guest_org": "",
+                "podcast_highlights": "• Check if the audio URL is accessible\n• Try a shorter episode\n• Use Demo Mode for sample analysis",
+                "podcast_details": "",
+                "_is_fallback": True
+            }
+
+        # Transcribe with Whisper
+        st.info("Transcribing with OpenAI Whisper...")
+        transcript = transcribe_audio(client, audio_path)
+        if not transcript:
+            return {
+                "podcast_summary": "Transcription failed. The audio format may not be supported or there was an API error.",
+                "podcast_guest": "N/A",
+                "podcast_guest_title": "Transcription failed",
+                "podcast_guest_org": "",
+                "podcast_highlights": "• Check OpenAI API status\n• Verify API key has Whisper access\n• Try a different episode",
+                "podcast_details": "",
+                "_is_fallback": True
+            }
 
     # Generate EM-focused summary with GPT
     st.info("Generating EM Portfolio Manager analysis...")
@@ -1639,7 +1734,9 @@ def main():
 
             if audio_url:
                 with st.spinner("Finalizing..."):
-                    result = process_podcast(audio_url)
+                    # Pass episode page URL if available for transcript extraction
+                    episode_page_url = episode_info.get('link') or episode_info.get('page_url')
+                    result = process_podcast(audio_url, episode_page_url)
                     st.session_state.last_result = result
                     st.session_state.processing = False
 

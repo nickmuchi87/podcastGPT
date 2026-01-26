@@ -273,6 +273,9 @@ def init_session_state():
     if 'last_result' not in st.session_state:
         st.session_state.last_result = None
 
+    if 'episode_listennotes_url' not in st.session_state:
+        st.session_state.episode_listennotes_url = None
+
 
 # ============================================================================
 # Utility Functions
@@ -1359,6 +1362,20 @@ def render_sidebar():
                 if ep_info.get('description'):
                     st.caption(ep_info['description'][:100] + "...")
 
+                # Optional Listen Notes URL for transcript
+                with st.expander("📝 Have Listen Notes URL? (optional)", expanded=False):
+                    ln_url = st.text_input(
+                        "Listen Notes Episode URL",
+                        placeholder="https://www.listennotes.com/podcasts/...",
+                        help="Paste the Listen Notes URL to use their transcript (if available) instead of Whisper",
+                        key="listennotes_url"
+                    )
+                    if ln_url:
+                        st.session_state.episode_listennotes_url = ln_url
+                        st.caption("Will check Listen Notes for transcript first")
+                    else:
+                        st.session_state.episode_listennotes_url = None
+
                 # Process button
                 if st.button("🚀 Process Episode", use_container_width=True, type="primary"):
                     st.session_state.processing = True
@@ -1383,9 +1400,7 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
 
     # Check if this is fallback/error data
     if result.get('_is_fallback'):
-        st.warning("**Modal Backend Unavailable**: Live podcast processing is not configured. "
-                   "The information below explains how to set it up. "
-                   "To explore the app with sample data, please use **Demo Mode** from the sidebar.")
+        st.warning("**Processing Issue**: " + result.get('podcast_summary', 'An error occurred.')[:200])
 
     # Extract EM-focused insights
     em_insights = extract_em_insights(result)
@@ -1734,9 +1749,15 @@ def main():
 
             if audio_url:
                 with st.spinner("Finalizing..."):
-                    # Pass episode page URL if available for transcript extraction
-                    episode_page_url = episode_info.get('link') or episode_info.get('page_url')
+                    # Use Listen Notes URL if provided, otherwise try RSS link
+                    episode_page_url = (
+                        st.session_state.get('episode_listennotes_url') or
+                        episode_info.get('link') or
+                        episode_info.get('page_url')
+                    )
                     result = process_podcast(audio_url, episode_page_url)
+                    # Clear the Listen Notes URL after processing
+                    st.session_state.episode_listennotes_url = None
                     st.session_state.last_result = result
                     st.session_state.processing = False
 

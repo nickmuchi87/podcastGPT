@@ -12,6 +12,8 @@ import requests
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import time
+import tempfile
+from openai import OpenAI
 
 # ============================================================================
 # Configuration & Constants
@@ -534,37 +536,189 @@ def format_topics_as_markdown(topics: Dict[str, List[str]]) -> str:
     return "\n".join(md_parts)
 
 
-def process_podcast(audio_url: str) -> Dict[str, Any]:
-    """Process a podcast episode using Modal backend."""
+def get_openai_client() -> Optional[OpenAI]:
+    """Get OpenAI client if API key is configured."""
+    api_key = os.environ.get('OPENAI_API_KEY') or st.session_state.get('openai_api_key')
+    if api_key:
+        return OpenAI(api_key=api_key)
+    return None
+
+
+def download_audio(audio_url: str, max_size_mb: int = 25) -> Optional[str]:
+    """Download audio file to a temporary location."""
     try:
-        # Try to use Modal backend
-        import modal
-        f = modal.Function.lookup("corise-podcast-project", "process_podcast")
-        result = f.remote(audio_url, '/content/')
+        headers = {'User-Agent': 'PodcastGPT/1.0'}
+        response = requests.get(audio_url, headers=headers, stream=True, timeout=60)
+        response.raise_for_status()
+
+        # Check content length if available
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > max_size_mb * 1024 * 1024:
+            return None  # File too large
+
+        # Save to temp file
+        suffix = '.mp3'
+        if 'audio/mp4' in response.headers.get('content-type', ''):
+            suffix = '.m4a'
+        elif 'audio/wav' in response.headers.get('content-type', ''):
+            suffix = '.wav'
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                tmp_file.write(chunk)
+            return tmp_file.name
+
+    except Exception as e:
+        st.error(f"Failed to download audio: {str(e)[:100]}")
+        return None
+
+
+def transcribe_audio(client: OpenAI, audio_path: str) -> Optional[str]:
+    """Transcribe audio using OpenAI Whisper."""
+    try:
+        with open(audio_path, 'rb') as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text"
+            )
+        return transcript
+    except Exception as e:
+        st.error(f"Transcription failed: {str(e)[:100]}")
+        return None
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(audio_path)
+        except:
+            pass
+
+
+def generate_em_summary(client: OpenAI, transcript: str) -> Dict[str, Any]:
+    """Generate EM Portfolio Manager focused summary using GPT."""
+
+    # Truncate transcript if too long (GPT-4 context limit)
+    max_chars = 100000
+    if len(transcript) > max_chars:
+        transcript = transcript[:max_chars] + "... [truncated]"
+
+    prompt = f"""You are an expert analyst helping Emerging Markets Portfolio Managers extract actionable insights from podcasts.
+
+Analyze this podcast transcript and provide a structured summary:
+
+TRANSCRIPT:
+{transcript}
+
+Please provide your analysis in the following JSON format:
+{{
+    "podcast_summary": "A 3-4 paragraph executive summary focusing on key investment themes, market views, and actionable insights relevant to EM investors",
+    "podcast_guest": "Name of the main guest/speaker (or 'Multiple Speakers' if unclear)",
+    "podcast_guest_title": "Their title/role",
+    "podcast_guest_org": "Their organization",
+    "podcast_highlights": "5-7 bullet points (each starting with •) of the most important takeaways for portfolio managers",
+    "podcast_details": "Additional context and detailed notes from the discussion"
+}}
+
+Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates, credit, FX, equities), macro themes, risk factors, and investment opportunities discussed."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a financial analyst specializing in Emerging Markets. Always respond with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=4000
+        )
+
+        result_text = response.choices[0].message.content
+
+        # Try to parse JSON from response
+        # Handle markdown code blocks if present
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0]
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0]
+
+        result = json.loads(result_text.strip())
         return result
-    except ImportError:
-        # Modal not installed
+
+    except json.JSONDecodeError:
+        # If JSON parsing fails, create structured response from text
         return {
-            "podcast_summary": "The Modal library is not installed. To process live podcasts, please install Modal with 'pip install modal' and configure your Modal account. Alternatively, use Demo Mode from the sidebar to explore pre-analyzed sample podcasts.",
-            "podcast_guest": "N/A",
-            "podcast_guest_title": "Modal not installed",
-            "podcast_guest_org": "Setup required",
-            "podcast_highlights": "• Install Modal: pip install modal\n• Configure Modal account: modal token new\n• Deploy the podcast processor\n• Or use Demo Mode for sample analysis",
-            "podcast_details": "",
-            "_is_fallback": True
+            "podcast_summary": result_text[:2000] if result_text else "Summary generation failed",
+            "podcast_guest": "Unknown",
+            "podcast_guest_title": "",
+            "podcast_guest_org": "",
+            "podcast_highlights": "• Analysis complete - see summary above",
+            "podcast_details": ""
         }
     except Exception as e:
-        error_msg = str(e)
-        # Return helpful error message - don't load unrelated sample data
         return {
-            "podcast_summary": f"Unable to process this podcast. The Modal backend returned an error: {error_msg[:200]}. Please ensure Modal is properly configured with the 'corise-podcast-project' deployment. For testing without Modal, use Demo Mode from the sidebar to explore pre-analyzed podcasts.",
+            "podcast_summary": f"GPT summarization failed: {str(e)[:200]}",
             "podcast_guest": "N/A",
-            "podcast_guest_title": "Processing unavailable",
-            "podcast_guest_org": "Modal backend error",
-            "podcast_highlights": "• Check Modal deployment status\n• Verify 'corise-podcast-project' exists\n• Ensure API keys are configured\n• Use Demo Mode for sample analysis",
+            "podcast_guest_title": "",
+            "podcast_guest_org": "",
+            "podcast_highlights": "",
             "podcast_details": "",
             "_is_fallback": True
         }
+
+
+def process_podcast(audio_url: str) -> Dict[str, Any]:
+    """Process a podcast episode using OpenAI (Whisper + GPT)."""
+
+    # Check for OpenAI API key
+    client = get_openai_client()
+    if not client:
+        return {
+            "podcast_summary": "OpenAI API key not configured. Please set your OPENAI_API_KEY environment variable or enter it in the sidebar. Alternatively, use Demo Mode to explore sample podcasts.",
+            "podcast_guest": "N/A",
+            "podcast_guest_title": "API key required",
+            "podcast_guest_org": "Setup required",
+            "podcast_highlights": "• Set OPENAI_API_KEY environment variable\n• Or enter API key in the sidebar\n• Or use Demo Mode for sample analysis",
+            "podcast_details": "",
+            "_is_fallback": True
+        }
+
+    # Download audio
+    st.info("Downloading podcast audio...")
+    audio_path = download_audio(audio_url)
+    if not audio_path:
+        return {
+            "podcast_summary": "Failed to download podcast audio. The file may be too large (>25MB) or the URL may be inaccessible.",
+            "podcast_guest": "N/A",
+            "podcast_guest_title": "Download failed",
+            "podcast_guest_org": "",
+            "podcast_highlights": "• Check if the audio URL is accessible\n• Try a shorter episode\n• Use Demo Mode for sample analysis",
+            "podcast_details": "",
+            "_is_fallback": True
+        }
+
+    # Transcribe with Whisper
+    st.info("Transcribing with OpenAI Whisper...")
+    transcript = transcribe_audio(client, audio_path)
+    if not transcript:
+        return {
+            "podcast_summary": "Transcription failed. The audio format may not be supported or there was an API error.",
+            "podcast_guest": "N/A",
+            "podcast_guest_title": "Transcription failed",
+            "podcast_guest_org": "",
+            "podcast_highlights": "• Check OpenAI API status\n• Verify API key has Whisper access\n• Try a different episode",
+            "podcast_details": "",
+            "_is_fallback": True
+        }
+
+    # Generate EM-focused summary with GPT
+    st.info("Generating EM Portfolio Manager analysis...")
+    result = generate_em_summary(client, transcript)
+
+    # Add transcript to details if not present
+    if not result.get('podcast_details'):
+        result['podcast_details'] = transcript[:5000] + "..." if len(transcript) > 5000 else transcript
+
+    return result
 
 
 def format_highlights(highlights: str) -> list:
@@ -907,6 +1061,26 @@ def load_demo_data() -> Optional[Dict[str, Any]]:
 def render_sidebar():
     """Render the sidebar with podcast input options."""
     with st.sidebar:
+        # API Key configuration
+        if 'openai_api_key' not in st.session_state:
+            st.session_state.openai_api_key = os.environ.get('OPENAI_API_KEY', '')
+
+        with st.expander("⚙️ API Configuration", expanded=not st.session_state.openai_api_key):
+            api_key = st.text_input(
+                "OpenAI API Key",
+                value=st.session_state.openai_api_key,
+                type="password",
+                help="Required for live podcast processing. Get your key at platform.openai.com"
+            )
+            if api_key != st.session_state.openai_api_key:
+                st.session_state.openai_api_key = api_key
+
+            if st.session_state.openai_api_key:
+                st.success("API key configured")
+            else:
+                st.warning("Enter API key for live processing, or use Demo Mode")
+
+        st.markdown("---")
         st.markdown("### 🎧 Select Podcast")
 
         # Check for demo data availability

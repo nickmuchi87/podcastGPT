@@ -1,14 +1,15 @@
 """
 PodcastGPT - AI-Powered Podcast Transcription & Summarization
-A seamless app for busy professionals to get key insights from podcasts.
+A seamless app for Emerging Markets Portfolio Managers to get actionable insights from podcasts.
 """
 
 import streamlit as st
 import json
 import os
+import re
 import feedparser
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import time
 
 # ============================================================================
@@ -17,16 +18,29 @@ import time
 
 APP_TITLE = "PodcastGPT"
 APP_ICON = "🎙️"
-APP_DESCRIPTION = "AI-Powered Podcast Transcription & Summarization"
+APP_DESCRIPTION = "AI-Powered Podcast Analysis for EM Portfolio Managers"
 
-# Sample podcasts for quick demo
+# Sample podcasts - EM and Macro focused
 SAMPLE_PODCASTS = {
+    "Emerging Markets Decoded (Moody's)": "https://feeds.megaphone.fm/moodystalksemergingmarketsdecoded",
     "Odd Lots (Bloomberg)": "https://feeds.bloomberg.fm/BLM3523997612",
-    "The Daily (NYT)": "https://feeds.simplecast.com/54nAGcIl",
-    "Planet Money (NPR)": "https://feeds.npr.org/510289/podcast.xml",
-    "Acquired": "https://feeds.megaphone.fm/acquired",
-    "Lex Fridman Podcast": "https://lexfridman.com/feed/podcast/",
+    "Masters in Business (Bloomberg)": "https://feeds.bloomberg.fm/BLM1126498698",
+    "Goldman Sachs Exchanges": "https://feeds.megaphone.fm/PPY9183498498",
+    "The Compound and Friends": "https://thecompoundnews.com/podcast/rss",
 }
+
+# EM Regions for analysis
+EM_REGIONS = [
+    "Latin America", "EMEA", "Asia ex-China", "China",
+    "Frontier Markets", "GCC/Middle East", "Eastern Europe"
+]
+
+# Asset classes for EM analysis
+EM_ASSET_CLASSES = [
+    "Hard Currency Sovereigns", "Local Currency Sovereigns",
+    "EM Corporates (IG)", "EM Corporates (HY)",
+    "EM Equities", "EM FX"
+]
 
 # ============================================================================
 # Page Configuration
@@ -332,6 +346,135 @@ def format_highlights(highlights: str) -> list:
     return [h.strip() for h in highlights.split('\n') if h.strip()]
 
 
+def extract_em_insights(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract and structure insights from an EM Portfolio Manager perspective.
+    Analyzes the summary and highlights to identify investment-relevant information.
+    """
+    summary = result.get('podcast_summary', '')
+    highlights = result.get('podcast_highlights', '')
+    details = result.get('podcast_details', '')
+    full_text = f"{summary} {highlights} {details}".lower()
+
+    # Regional mentions
+    regions_mentioned = []
+    region_keywords = {
+        "Latin America": ["brazil", "mexico", "argentina", "chile", "colombia", "peru", "latam", "latin america", "south america"],
+        "EMEA": ["turkey", "south africa", "egypt", "nigeria", "poland", "hungary", "czech", "romania", "emea"],
+        "Asia ex-China": ["india", "indonesia", "vietnam", "philippines", "thailand", "malaysia", "korea", "taiwan", "asia"],
+        "China": ["china", "chinese", "beijing", "shanghai", "renminbi", "yuan", "cny"],
+        "Frontier Markets": ["frontier", "kenya", "bangladesh", "sri lanka", "pakistan", "ghana", "zambia"],
+        "GCC/Middle East": ["saudi", "uae", "qatar", "kuwait", "gcc", "middle east", "gulf"],
+        "Eastern Europe": ["russia", "ukraine", "poland", "hungary", "czech", "romania", "eastern europe"],
+    }
+
+    for region, keywords in region_keywords.items():
+        if any(kw in full_text for kw in keywords):
+            regions_mentioned.append(region)
+
+    # Asset class mentions
+    asset_classes_mentioned = []
+    asset_keywords = {
+        "Hard Currency Sovereigns": ["hard currency", "dollar bond", "usd bond", "sovereign debt", "eurobond"],
+        "Local Currency Sovereigns": ["local currency", "local bond", "domestic bond", "local rates"],
+        "EM Corporates": ["corporate bond", "em corporate", "corporate credit", "high yield corporate"],
+        "EM Equities": ["equities", "stocks", "equity market", "stock market"],
+        "EM FX": ["currency", "fx", "foreign exchange", "depreciation", "appreciation"],
+    }
+
+    for asset_class, keywords in asset_keywords.items():
+        if any(kw in full_text for kw in keywords):
+            asset_classes_mentioned.append(asset_class)
+
+    # Sentiment indicators
+    bullish_keywords = ["bullish", "optimistic", "opportunity", "undervalued", "attractive", "upside", "rally", "recovery", "positive"]
+    bearish_keywords = ["bearish", "pessimistic", "risk", "overvalued", "downside", "sell", "decline", "negative", "concern", "worried"]
+
+    bullish_count = sum(1 for kw in bullish_keywords if kw in full_text)
+    bearish_count = sum(1 for kw in bearish_keywords if kw in full_text)
+
+    if bullish_count > bearish_count + 2:
+        sentiment = "Bullish"
+    elif bearish_count > bullish_count + 2:
+        sentiment = "Bearish"
+    else:
+        sentiment = "Neutral/Mixed"
+
+    # Key themes extraction
+    theme_keywords = {
+        "Monetary Policy": ["rate cut", "rate hike", "central bank", "fed", "monetary policy", "inflation"],
+        "Credit Conditions": ["credit", "spread", "default", "restructuring", "npls", "non-performing"],
+        "Growth Outlook": ["gdp", "growth", "recession", "slowdown", "recovery", "expansion"],
+        "Political Risk": ["election", "political", "government", "reform", "policy change"],
+        "External Flows": ["inflows", "outflows", "capital flows", "foreign investment", "fund flows"],
+        "Currency Dynamics": ["currency", "depreciation", "appreciation", "fx", "dollar strength"],
+        "Commodity Impact": ["oil", "commodity", "metals", "energy", "agriculture"],
+        "ESG/Climate": ["esg", "climate", "sustainability", "green", "transition"],
+    }
+
+    themes_identified = []
+    for theme, keywords in theme_keywords.items():
+        if any(kw in full_text for kw in keywords):
+            themes_identified.append(theme)
+
+    # Extract any specific countries/names mentioned
+    country_patterns = [
+        r'\b(brazil|mexico|turkey|india|china|indonesia|south africa|argentina|chile|colombia|poland|hungary|egypt|nigeria|pakistan|vietnam|philippines|thailand|malaysia|romania|czech|saudi|uae|qatar)\b'
+    ]
+
+    countries_mentioned = []
+    for pattern in country_patterns:
+        matches = re.findall(pattern, full_text, re.IGNORECASE)
+        countries_mentioned.extend([m.title() for m in matches])
+    countries_mentioned = list(set(countries_mentioned))[:8]  # Top 8 unique
+
+    return {
+        "regions": regions_mentioned if regions_mentioned else ["Global/Broad EM"],
+        "asset_classes": asset_classes_mentioned if asset_classes_mentioned else ["Multiple"],
+        "sentiment": sentiment,
+        "themes": themes_identified if themes_identified else ["General Market Commentary"],
+        "countries": countries_mentioned,
+        "bullish_score": bullish_count,
+        "bearish_score": bearish_count,
+    }
+
+
+def format_investment_summary(result: Dict[str, Any], em_insights: Dict[str, Any]) -> str:
+    """Format the summary as a structured investment research note."""
+    summary = result.get('podcast_summary', 'No summary available.')
+    highlights = result.get('podcast_highlights', '')
+
+    # Parse highlights into actionable items
+    highlight_items = format_highlights(highlights)
+
+    formatted = f"""
+**Overall Sentiment:** {em_insights['sentiment']}
+
+**Key Investment Themes:**
+{chr(10).join(f"• {theme}" for theme in em_insights['themes'])}
+
+**Regional Focus:**
+{chr(10).join(f"• {region}" for region in em_insights['regions'])}
+
+**Countries Discussed:**
+{', '.join(em_insights['countries']) if em_insights['countries'] else 'Broad EM discussion'}
+
+**Asset Classes Relevant:**
+{chr(10).join(f"• {ac}" for ac in em_insights['asset_classes'])}
+
+---
+
+**Executive Summary:**
+{summary}
+
+---
+
+**Key Takeaways for Portfolio Positioning:**
+{chr(10).join(f"{i+1}. {h.lstrip('•-* ').strip()}" for i, h in enumerate(highlight_items) if h.strip())}
+"""
+    return formatted
+
+
 def add_to_history(episode_title: str, podcast_title: str, result: Dict[str, Any]):
     """Add a processed podcast to history."""
     history_entry = {
@@ -368,6 +511,121 @@ def generate_markdown_export(episode_title: str, result: Dict[str, Any]) -> str:
     return md
 
 
+def generate_research_note(episode_title: str, result: Dict[str, Any],
+                           em_insights: Dict[str, Any], episode_info: Optional[Dict] = None) -> str:
+    """Generate a professional EM research note format."""
+    guest_name = result.get('podcast_guest', 'Unknown')
+    guest_title = result.get('podcast_guest_title', '')
+    guest_org = result.get('podcast_guest_org', '')
+    podcast_title = episode_info.get('podcast_title', 'Podcast') if episode_info else 'Podcast'
+
+    highlights = format_highlights(result.get('podcast_highlights', ''))
+    takeaways = '\n'.join(f"{i+1}. {h.lstrip('•-* ').strip()}"
+                          for i, h in enumerate(highlights) if h.strip())
+
+    note = f"""# EM Research Note: Podcast Summary
+## {episode_title}
+
+**Source:** {podcast_title}
+**Date:** {datetime.now().strftime('%Y-%m-%d')}
+**Analyst:** PodcastGPT AI
+
+---
+
+## QUICK REFERENCE
+
+| Metric | Value |
+|--------|-------|
+| **Overall Sentiment** | {em_insights['sentiment']} |
+| **Primary Regions** | {', '.join(em_insights['regions'])} |
+| **Countries Discussed** | {', '.join(em_insights['countries']) if em_insights['countries'] else 'Broad EM'} |
+| **Asset Classes** | {', '.join(em_insights['asset_classes'])} |
+| **Key Themes** | {', '.join(em_insights['themes'])} |
+
+---
+
+## GUEST PROFILE
+
+**{guest_name}**
+{guest_title}
+{guest_org}
+
+---
+
+## EXECUTIVE SUMMARY
+
+{result.get('podcast_summary', 'No summary available.')}
+
+---
+
+## KEY INVESTMENT THEMES
+
+{chr(10).join(f"### {theme}" for theme in em_insights['themes'])}
+
+---
+
+## ACTIONABLE TAKEAWAYS
+
+{takeaways if takeaways else 'No specific takeaways extracted.'}
+
+---
+
+## REGIONAL BREAKDOWN
+
+{chr(10).join(f"- **{region}**: Discussed in this episode" for region in em_insights['regions'])}
+
+---
+
+## RISK CONSIDERATIONS
+
+Based on the discussion, portfolio managers should consider:
+- Sentiment indicators suggest a **{em_insights['sentiment'].lower()}** bias
+- Focus areas: {', '.join(em_insights['themes'][:3])}
+- Geographic exposure: {', '.join(em_insights['countries'][:5]) if em_insights['countries'] else 'Broad EM exposure'}
+
+---
+
+## APPENDIX: SENTIMENT ANALYSIS
+
+- Bullish signals detected: {em_insights['bullish_score']}
+- Bearish signals detected: {em_insights['bearish_score']}
+- Net sentiment: {'Positive' if em_insights['bullish_score'] > em_insights['bearish_score'] else 'Negative' if em_insights['bearish_score'] > em_insights['bullish_score'] else 'Neutral'}
+
+---
+
+*This research note was automatically generated by PodcastGPT on {datetime.now().strftime('%Y-%m-%d %H:%M')}*
+*For internal use only. Not investment advice.*
+"""
+    return note
+
+
+def generate_quick_summary(episode_title: str, result: Dict[str, Any],
+                           em_insights: Dict[str, Any]) -> str:
+    """Generate a quick summary suitable for email/slack."""
+    highlights = format_highlights(result.get('podcast_highlights', ''))
+    takeaways = '\n'.join(f"  - {h.lstrip('•-* ').strip()}"
+                          for h in highlights[:5] if h.strip())
+
+    summary = f"""EM PODCAST SUMMARY: {episode_title}
+
+SENTIMENT: {em_insights['sentiment']}
+REGIONS: {', '.join(em_insights['regions'])}
+THEMES: {', '.join(em_insights['themes'][:4])}
+
+GUEST: {result.get('podcast_guest', 'Unknown')} ({result.get('podcast_guest_org', 'N/A')})
+
+KEY POINTS:
+{takeaways}
+
+BOTTOM LINE:
+{result.get('podcast_summary', 'No summary available.')[:500]}...
+
+---
+Generated by PodcastGPT | {datetime.now().strftime('%Y-%m-%d')}
+"""
+    return summary
+
+
 # ============================================================================
 # UI Components
 # ============================================================================
@@ -377,7 +635,7 @@ def render_header():
     st.markdown("""
     <div class="app-header">
         <h1>🎙️ PodcastGPT</h1>
-        <p>AI-Powered Podcast Transcription & Summarization for Busy Professionals</p>
+        <p>AI-Powered Podcast Analysis for Emerging Markets Portfolio Managers</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -478,7 +736,10 @@ def render_sidebar():
 
 
 def render_results(episode_title: str, result: Dict[str, Any], episode_info: Optional[Dict] = None):
-    """Render the podcast processing results."""
+    """Render the podcast processing results with EM Portfolio Manager focus."""
+
+    # Extract EM-focused insights
+    em_insights = extract_em_insights(result)
 
     # Episode header
     st.markdown(f"## 📻 {episode_title}")
@@ -487,129 +748,257 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
 
     st.markdown("---")
 
-    # Main content in columns
-    col1, col2 = st.columns([2, 1])
+    # Quick Investment Dashboard
+    st.markdown("### 📊 Investment Dashboard")
 
-    with col1:
-        # Summary section
-        st.markdown("### 📝 Episode Summary")
-        st.markdown(f"""
-        <div class="summary-section">
-            {result.get('podcast_summary', 'No summary available.')}
-        </div>
-        """, unsafe_allow_html=True)
+    # Metrics row
+    metric_cols = st.columns(4)
 
-        # Key Highlights
-        st.markdown("### ✨ Key Highlights")
-        highlights = format_highlights(result.get('podcast_highlights', ''))
-        if highlights:
-            for highlight in highlights:
-                # Clean up bullet points
-                clean_highlight = highlight.lstrip('•-* ').strip()
-                if clean_highlight:
-                    st.markdown(f"""
-                    <div class="highlight-item">
-                        {clean_highlight}
-                    </div>
-                    """, unsafe_allow_html=True)
-        else:
-            st.info("No highlights available for this episode.")
+    with metric_cols[0]:
+        sentiment_color = "🟢" if em_insights['sentiment'] == "Bullish" else "🔴" if em_insights['sentiment'] == "Bearish" else "🟡"
+        st.metric(
+            label="Sentiment",
+            value=f"{sentiment_color} {em_insights['sentiment']}"
+        )
 
-    with col2:
-        # Podcast image
-        if episode_info and episode_info.get('image'):
-            st.image(episode_info['image'], use_container_width=True)
+    with metric_cols[1]:
+        st.metric(
+            label="Regions Covered",
+            value=len(em_insights['regions'])
+        )
 
+    with metric_cols[2]:
+        st.metric(
+            label="Countries Mentioned",
+            value=len(em_insights['countries'])
+        )
+
+    with metric_cols[3]:
+        st.metric(
+            label="Key Themes",
+            value=len(em_insights['themes'])
+        )
+
+    st.markdown("---")
+
+    # Create tabs for different views
+    tab1, tab2, tab3 = st.tabs(["📈 EM Analysis", "📝 Full Summary", "👤 Guest Info"])
+
+    with tab1:
+        # EM-focused analysis view
+        col1, col2 = st.columns([3, 2])
+
+        with col1:
+            # Investment Themes
+            st.markdown("#### 🎯 Key Investment Themes")
+            for theme in em_insights['themes']:
+                st.markdown(f"""
+                <div class="highlight-item">
+                    <strong>{theme}</strong>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Key Takeaways
+            st.markdown("#### 💡 Actionable Takeaways")
+            highlights = format_highlights(result.get('podcast_highlights', ''))
+            if highlights:
+                for i, highlight in enumerate(highlights, 1):
+                    clean_highlight = highlight.lstrip('•-* ').strip()
+                    if clean_highlight:
+                        st.markdown(f"""
+                        <div class="highlight-item">
+                            <strong>{i}.</strong> {clean_highlight}
+                        </div>
+                        """, unsafe_allow_html=True)
+
+        with col2:
+            # Regional Focus
+            st.markdown("#### 🌍 Regional Focus")
+            for region in em_insights['regions']:
+                st.markdown(f"• **{region}**")
+
+            # Countries
+            if em_insights['countries']:
+                st.markdown("#### 🏳️ Countries Discussed")
+                st.markdown(", ".join(f"**{c}**" for c in em_insights['countries']))
+
+            # Asset Classes
+            st.markdown("#### 💼 Relevant Asset Classes")
+            for ac in em_insights['asset_classes']:
+                st.markdown(f"• {ac}")
+
+            # Sentiment breakdown
+            st.markdown("#### 📊 Sentiment Indicators")
+            bull_score = em_insights['bullish_score']
+            bear_score = em_insights['bearish_score']
+            total = bull_score + bear_score if (bull_score + bear_score) > 0 else 1
+
+            st.progress(bull_score / total if total > 0 else 0.5)
+            st.caption(f"Bullish signals: {bull_score} | Bearish signals: {bear_score}")
+
+    with tab2:
+        # Full summary view
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.markdown("#### 📝 Executive Summary")
+            st.markdown(f"""
+            <div class="summary-section">
+                {result.get('podcast_summary', 'No summary available.')}
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col2:
+            # Podcast image
+            if episode_info and episode_info.get('image'):
+                st.image(episode_info['image'], use_container_width=True)
+
+    with tab3:
         # Guest information
-        st.markdown("### 👤 Guest")
-        guest_name = result.get('podcast_guest', 'Unknown')
-        guest_title = result.get('podcast_guest_title', '')
-        guest_org = result.get('podcast_guest_org', '')
+        col1, col2 = st.columns([1, 2])
 
-        st.markdown(f"""
-        <div class="guest-card">
-            <h4>{guest_name}</h4>
-            <p>{guest_title}</p>
-            <p><strong>{guest_org}</strong></p>
-        </div>
-        """, unsafe_allow_html=True)
+        with col1:
+            if episode_info and episode_info.get('image'):
+                st.image(episode_info['image'], use_container_width=True)
 
-        # Export options
-        st.markdown("### 📤 Export")
+        with col2:
+            guest_name = result.get('podcast_guest', 'Unknown')
+            guest_title = result.get('podcast_guest_title', '')
+            guest_org = result.get('podcast_guest_org', '')
 
-        markdown_content = generate_markdown_export(episode_title, result)
+            st.markdown(f"""
+            <div class="guest-card">
+                <h4>{guest_name}</h4>
+                <p>{guest_title}</p>
+                <p><strong>{guest_org}</strong></p>
+            </div>
+            """, unsafe_allow_html=True)
 
+            st.markdown("---")
+            st.markdown("**Why This Matters:**")
+            st.markdown(f"Understanding the guest's background helps contextualize their views on EM markets and potential biases in their analysis.")
+
+    # Export section
+    st.markdown("---")
+    st.markdown("### 📤 Export Research Note")
+
+    export_cols = st.columns(3)
+
+    # Generate professional research note
+    research_note = generate_research_note(episode_title, result, em_insights, episode_info)
+
+    with export_cols[0]:
         st.download_button(
-            label="📄 Download Summary",
-            data=markdown_content,
-            file_name=f"podcast_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+            label="📄 Download Research Note",
+            data=research_note,
+            file_name=f"EM_Research_Note_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
             mime="text/markdown",
             use_container_width=True
         )
 
-        if st.button("📋 Copy to Clipboard", use_container_width=True):
-            st.code(markdown_content, language="markdown")
-            st.info("Copy the text above!")
+    with export_cols[1]:
+        # Quick summary for clipboard
+        quick_summary = generate_quick_summary(episode_title, result, em_insights)
+        st.download_button(
+            label="📋 Quick Summary (Email)",
+            data=quick_summary,
+            file_name=f"EM_Quick_Summary_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    with export_cols[2]:
+        if st.button("👁️ Preview Note", use_container_width=True):
+            with st.expander("Research Note Preview", expanded=True):
+                st.markdown(research_note)
 
 
 def render_home():
-    """Render the home/welcome screen."""
-    st.markdown("### 👋 Welcome to PodcastGPT")
+    """Render the home/welcome screen with EM focus."""
+    st.markdown("### 👋 Welcome to PodcastGPT for EM Portfolio Managers")
 
     st.markdown("""
-    Transform hours of podcast content into actionable insights in minutes.
+    Transform hours of macro and EM podcast content into **structured, actionable investment insights** in minutes.
 
-    **How it works:**
-    1. **Select a podcast** from samples or paste an RSS feed URL
-    2. **Choose an episode** from the available list
-    3. **Process** and get AI-powered summaries, guest info, and key highlights
-    4. **Export** your summaries for later reference
+    **Built for EM Portfolio Managers who need to:**
+    - Stay on top of market commentary from key voices
+    - Quickly extract regional views and sentiment
+    - Identify investment themes and catalysts
+    - Generate research notes for team distribution
     """)
 
-    # Quick stats
-    col1, col2, col3 = st.columns(3)
+    # Quick stats - EM focused
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.markdown("""
         <div class="metric-card">
-            <h2>🎯</h2>
-            <p>Key Insights Extraction</p>
+            <h2>🌍</h2>
+            <p>Regional Analysis</p>
         </div>
         """, unsafe_allow_html=True)
 
     with col2:
         st.markdown("""
         <div class="metric-card">
-            <h2>👤</h2>
-            <p>Guest Identification</p>
+            <h2>📊</h2>
+            <p>Sentiment Detection</p>
         </div>
         """, unsafe_allow_html=True)
 
     with col3:
         st.markdown("""
         <div class="metric-card">
+            <h2>💼</h2>
+            <p>Asset Class Tags</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        st.markdown("""
+        <div class="metric-card">
             <h2>📝</h2>
-            <p>Smart Summaries</p>
+            <p>Research Notes</p>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # Feature highlights
-    st.markdown("### ✨ Features")
+    # EM-specific features
+    st.markdown("### 📈 EM-Focused Features")
 
-    features = [
-        ("🎙️ Multiple Input Methods", "Use sample podcasts or paste any RSS feed URL"),
-        ("⚡ Fast Processing", "AI-powered transcription and summarization"),
-        ("📚 History Tracking", "Access your previously processed episodes"),
-        ("📤 Easy Export", "Download summaries as Markdown files"),
-    ]
+    col1, col2 = st.columns(2)
 
-    for title, desc in features:
-        st.markdown(f"**{title}** - {desc}")
+    with col1:
+        st.markdown("""
+        **Investment Analysis:**
+        - Automatic sentiment scoring (Bullish/Bearish/Neutral)
+        - Regional focus detection (LatAm, EMEA, Asia, etc.)
+        - Country-specific mentions extraction
+        - Asset class relevance tagging
+        """)
+
+    with col2:
+        st.markdown("""
+        **Professional Output:**
+        - Structured research note format
+        - Quick summary for email/Slack
+        - Investment theme identification
+        - Actionable takeaways extraction
+        """)
 
     st.markdown("---")
-    st.info("👈 **Get started:** Select a podcast from the sidebar!")
+
+    # Sample podcasts showcase
+    st.markdown("### 🎧 Pre-loaded EM & Macro Podcasts")
+
+    podcast_cols = st.columns(len(SAMPLE_PODCASTS))
+    for i, (name, _) in enumerate(SAMPLE_PODCASTS.items()):
+        with podcast_cols[i]:
+            st.markdown(f"**{name.split('(')[0].strip()}**")
+
+    st.markdown("---")
+    st.info("👈 **Get started:** Select a podcast from the sidebar and fetch episodes!")
 
 
 def render_processing_screen():

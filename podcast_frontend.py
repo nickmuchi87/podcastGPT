@@ -535,31 +535,35 @@ def format_topics_as_markdown(topics: Dict[str, List[str]]) -> str:
 
 
 def process_podcast(audio_url: str) -> Dict[str, Any]:
-    """Process a podcast episode using Modal backend or local sample data."""
+    """Process a podcast episode using Modal backend."""
     try:
-        # First, try to use Modal backend
+        # Try to use Modal backend
         import modal
         f = modal.Function.lookup("corise-podcast-project", "process_podcast")
         result = f.remote(audio_url, '/content/')
         return result
-    except Exception as e:
-        # If Modal fails, check for sample data
-        sample_files = ['podcast-1.json', 'podcast-2.json']
-        for sample_file in sample_files:
-            if os.path.exists(sample_file):
-                try:
-                    with open(sample_file, 'r') as f:
-                        return json.load(f)
-                except:
-                    continue
-
-        # Return demo data if nothing else works
+    except ImportError:
+        # Modal not installed
         return {
-            "podcast_summary": "Unable to process this podcast. The Modal backend is not configured or the sample data files are not available. Please ensure Modal is properly set up with the 'corise-podcast-project' project.",
+            "podcast_summary": "The Modal library is not installed. To process live podcasts, please install Modal with 'pip install modal' and configure your Modal account. Alternatively, use Demo Mode from the sidebar to explore pre-analyzed sample podcasts.",
             "podcast_guest": "N/A",
-            "podcast_guest_title": "Backend not configured",
-            "podcast_guest_org": "Please configure Modal backend",
-            "podcast_highlights": "• Configure Modal backend for live transcription\n• Ensure API keys are set up\n• Check network connectivity"
+            "podcast_guest_title": "Modal not installed",
+            "podcast_guest_org": "Setup required",
+            "podcast_highlights": "• Install Modal: pip install modal\n• Configure Modal account: modal token new\n• Deploy the podcast processor\n• Or use Demo Mode for sample analysis",
+            "podcast_details": "",
+            "_is_fallback": True
+        }
+    except Exception as e:
+        error_msg = str(e)
+        # Return helpful error message - don't load unrelated sample data
+        return {
+            "podcast_summary": f"Unable to process this podcast. The Modal backend returned an error: {error_msg[:200]}. Please ensure Modal is properly configured with the 'corise-podcast-project' deployment. For testing without Modal, use Demo Mode from the sidebar to explore pre-analyzed podcasts.",
+            "podcast_guest": "N/A",
+            "podcast_guest_title": "Processing unavailable",
+            "podcast_guest_org": "Modal backend error",
+            "podcast_highlights": "• Check Modal deployment status\n• Verify 'corise-podcast-project' exists\n• Ensure API keys are configured\n• Use Demo Mode for sample analysis",
+            "podcast_details": "",
+            "_is_fallback": True
         }
 
 
@@ -1047,6 +1051,12 @@ def render_sidebar():
 
 def render_results(episode_title: str, result: Dict[str, Any], episode_info: Optional[Dict] = None):
     """Render the podcast processing results with EM Portfolio Manager focus."""
+
+    # Check if this is fallback/error data
+    if result.get('_is_fallback'):
+        st.warning("**Modal Backend Unavailable**: Live podcast processing is not configured. "
+                   "The information below explains how to set it up. "
+                   "To explore the app with sample data, please use **Demo Mode** from the sidebar.")
 
     # Extract EM-focused insights
     em_insights = extract_em_insights(result)

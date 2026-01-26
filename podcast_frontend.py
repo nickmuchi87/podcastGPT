@@ -21,13 +21,13 @@ APP_TITLE = "PodcastGPT"
 APP_ICON = "🎙️"
 APP_DESCRIPTION = "AI-Powered Podcast Analysis for EM Portfolio Managers"
 
-# Sample podcasts - EM and Macro focused
+# Sample podcasts - EM and Macro focused (using reliable RSS feeds)
 SAMPLE_PODCASTS = {
-    "Emerging Markets Decoded (Moody's)": "https://feeds.megaphone.fm/moodystalksemergingmarketsdecoded",
-    "Odd Lots (Bloomberg)": "https://feeds.bloomberg.fm/BLM3523997612",
-    "Masters in Business (Bloomberg)": "https://feeds.bloomberg.fm/BLM1126498698",
-    "Goldman Sachs Exchanges": "https://feeds.megaphone.fm/PPY9183498498",
-    "The Compound and Friends": "https://thecompoundnews.com/podcast/rss",
+    "All-In Podcast": "https://feeds.megaphone.fm/all-in-with-chamath-jason-sacks-friedberg",
+    "Invest Like the Best": "https://feeds.megaphone.fm/investlikethebest",
+    "Macro Voices": "https://feeds.megaphone.fm/macrovoices",
+    "Real Vision Daily Briefing": "https://feeds.megaphone.fm/realvision",
+    "The Prof G Pod": "https://feeds.megaphone.fm/profgpod",
 }
 
 # EM Regions for analysis
@@ -346,12 +346,19 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
             "episodes": episodes
         }
 
+    except requests.exceptions.ConnectionError as e:
+        return {"error": "Connection failed. The feed URL may be blocked or the server is unreachable. Try a different podcast or check your network."}
+    except requests.exceptions.Timeout:
+        return {"error": "Request timed out. The server took too long to respond. Please try again."}
     except requests.RequestException as e:
-        return {"error": f"Failed to fetch feed: {str(e)}"}
+        error_msg = str(e)
+        if "NameResolutionError" in error_msg or "Name or service not known" in error_msg:
+            return {"error": "Could not resolve the feed URL. This feed may be unavailable in your network. Try a different podcast."}
+        return {"error": f"Failed to fetch feed: {error_msg[:100]}"}
     except ET.ParseError as e:
-        return {"error": f"Failed to parse feed XML: {str(e)}"}
+        return {"error": "The URL returned invalid XML. Make sure it's a valid RSS feed URL."}
     except Exception as e:
-        return {"error": f"Failed to parse feed: {str(e)}"}
+        return {"error": f"Unexpected error: {str(e)[:100]}"}
 
 
 def process_podcast(audio_url: str) -> Dict[str, Any]:
@@ -684,21 +691,59 @@ def render_header():
     """, unsafe_allow_html=True)
 
 
+def load_demo_data() -> Optional[Dict[str, Any]]:
+    """Load demo data from local JSON files."""
+    demo_files = {
+        "Odd Lots - China Economy Deep Dive": "podcast-1.json",
+        "EM Decoded - Emerging Markets Outlook": "podcast-2.json",
+    }
+
+    available_demos = {}
+    for name, filepath in demo_files.items():
+        if os.path.exists(filepath):
+            available_demos[name] = filepath
+
+    return available_demos if available_demos else None
+
+
 def render_sidebar():
     """Render the sidebar with podcast input options."""
     with st.sidebar:
         st.markdown("### 🎧 Select Podcast")
 
+        # Check for demo data availability
+        demo_data = load_demo_data()
+
         # Input method selection
+        input_options = ["Sample Podcasts", "RSS Feed URL"]
+        if demo_data:
+            input_options.insert(0, "Demo Mode (Offline)")
+
         input_method = st.radio(
             "Choose input method:",
-            ["Sample Podcasts", "RSS Feed URL"],
+            input_options,
             label_visibility="collapsed"
         )
 
         feed_url = None
 
-        if input_method == "Sample Podcasts":
+        feed_url = None
+        use_demo = False
+
+        if input_method == "Demo Mode (Offline)":
+            st.markdown("##### 🎬 Demo Mode")
+            st.info("Using pre-loaded sample data - no network required!")
+            if demo_data:
+                selected_demo = st.selectbox(
+                    "Select demo episode:",
+                    options=list(demo_data.keys()),
+                    help="Pre-analyzed podcast episodes for demonstration"
+                )
+                use_demo = True
+            else:
+                st.warning("No demo files found.")
+
+        elif input_method == "Sample Podcasts":
             st.markdown("##### Quick Start")
             selected_sample = st.selectbox(
                 "Select a podcast:",
@@ -725,8 +770,32 @@ def render_sidebar():
 
         st.markdown("---")
 
-        # Fetch episodes button
-        if st.button("🔍 Fetch Episodes", use_container_width=True, type="primary"):
+        # Demo mode - load directly
+        if use_demo and demo_data:
+            if st.button("📊 Load Demo Analysis", use_container_width=True, type="primary"):
+                filepath = demo_data[selected_demo]
+                try:
+                    with open(filepath, 'r') as f:
+                        result = json.load(f)
+                    st.session_state.last_result = result
+                    st.session_state.selected_episode = selected_demo
+                    st.session_state.current_episodes = {
+                        "episodes": {
+                            selected_demo: {
+                                'podcast_title': 'Demo Podcast',
+                                'image': '',
+                                'description': 'Pre-loaded demo data'
+                            }
+                        }
+                    }
+                    add_to_history(selected_demo, "Demo", result)
+                    st.success("Demo loaded!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load demo: {str(e)}")
+
+        # Fetch episodes button (for non-demo modes)
+        elif st.button("🔍 Fetch Episodes", use_container_width=True, type="primary"):
             if feed_url:
                 with st.spinner("Fetching episodes..."):
                     result = parse_podcast_feed(feed_url)

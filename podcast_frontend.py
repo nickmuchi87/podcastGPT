@@ -7,7 +7,8 @@ import streamlit as st
 import json
 import os
 import re
-import feedparser
+import xml.etree.ElementTree as ET
+import requests
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import time
@@ -256,39 +257,75 @@ def init_session_state():
 # ============================================================================
 
 def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
-    """Parse a podcast RSS feed and extract episode information."""
+    """Parse a podcast RSS feed and extract episode information using requests + XML."""
     try:
-        feed = feedparser.parse(feed_url)
+        # Fetch the RSS feed
+        headers = {
+            'User-Agent': 'PodcastGPT/1.0 (Podcast Aggregator)'
+        }
+        response = requests.get(feed_url, headers=headers, timeout=15)
+        response.raise_for_status()
 
-        if not feed.entries:
+        # Parse XML
+        root = ET.fromstring(response.content)
+
+        # Handle different RSS namespaces
+        namespaces = {
+            'itunes': 'http://www.itunes.com/dtds/podcast-1.0.dtd',
+            'media': 'http://search.yahoo.com/mrss/',
+            'content': 'http://purl.org/rss/1.0/modules/content/'
+        }
+
+        # Get channel info
+        channel = root.find('channel')
+        if channel is None:
+            return {"error": "Invalid RSS feed format."}
+
+        podcast_title = channel.findtext('title', 'Unknown Podcast')
+
+        # Get podcast image
+        podcast_image = ''
+        image_elem = channel.find('image')
+        if image_elem is not None:
+            podcast_image = image_elem.findtext('url', '')
+        if not podcast_image:
+            itunes_image = channel.find('itunes:image', namespaces)
+            if itunes_image is not None:
+                podcast_image = itunes_image.get('href', '')
+
+        # Get episodes (items)
+        items = channel.findall('item')[:10]  # Get latest 10 episodes
+
+        if not items:
             return {"error": "No episodes found in this feed."}
 
         episodes = {}
-        podcast_title = feed.feed.get('title', 'Unknown Podcast')
-        podcast_image = feed.feed.get('image', {}).get('href', '')
+        for item in items:
+            title = item.findtext('title', 'Untitled Episode')
 
-        for entry in feed.entries[:10]:  # Get latest 10 episodes
-            title = entry.get('title', 'Untitled Episode')
+            # Get audio URL from enclosure
+            audio_url = ''
+            enclosure = item.find('enclosure')
+            if enclosure is not None:
+                enc_type = enclosure.get('type', '')
+                if enc_type.startswith('audio/') or enc_type == '':
+                    audio_url = enclosure.get('url', '')
 
             # Get episode image
-            episode_image = ''
-            if 'image' in entry:
-                episode_image = entry['image'].get('href', '')
-            if not episode_image:
-                episode_image = podcast_image
+            episode_image = podcast_image
+            itunes_img = item.find('itunes:image', namespaces)
+            if itunes_img is not None:
+                episode_image = itunes_img.get('href', episode_image)
 
-            # Get audio URL
-            audio_url = ''
-            for link in entry.get('links', []):
-                if link.get('type', '').startswith('audio/'):
-                    audio_url = link.get('href', '')
-                    break
-
-            # Get episode description
-            description = entry.get('summary', entry.get('description', ''))[:200]
+            # Get description
+            description = item.findtext('description', '')
+            if not description:
+                description = item.findtext('itunes:summary', namespaces) or ''
+            # Clean HTML tags and truncate
+            description = re.sub(r'<[^>]+>', '', description)[:200]
 
             # Get published date
-            published = entry.get('published', '')
+            published = item.findtext('pubDate', '')
 
             if audio_url:  # Only add if we have an audio URL
                 episodes[title] = {
@@ -299,6 +336,9 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
                     'podcast_title': podcast_title
                 }
 
+        if not episodes:
+            return {"error": "No episodes with audio found in this feed."}
+
         return {
             "success": True,
             "podcast_title": podcast_title,
@@ -306,6 +346,10 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
             "episodes": episodes
         }
 
+    except requests.RequestException as e:
+        return {"error": f"Failed to fetch feed: {str(e)}"}
+    except ET.ParseError as e:
+        return {"error": f"Failed to parse feed XML: {str(e)}"}
     except Exception as e:
         return {"error": f"Failed to parse feed: {str(e)}"}
 

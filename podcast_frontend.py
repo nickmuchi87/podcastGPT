@@ -23,11 +23,16 @@ APP_DESCRIPTION = "AI-Powered Podcast Analysis for EM Portfolio Managers"
 
 # Sample podcasts - EM and Macro focused (using reliable RSS feeds)
 SAMPLE_PODCASTS = {
+    # Primary EM-focused podcasts
+    "Odd Lots (Bloomberg)": "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/8a94442e-5a74-4fa2-8b8d-ae27003a8d6b/982f5071-765c-403d-969d-ae27003a8d83/podcast.rss",
+    "EM Podcast (Tellimer)": "https://anchor.fm/s/4ad0dd20/podcast/rss",
+    "Moody's EM Decoded": "https://feeds.megaphone.fm/moodystalksemergingmarketsdecoded",
+    "Clauses & Controversies": "https://feeds.soundcloud.com/users/soundcloud:users:863571279/sounds.rss",
+    "Geopolitics (Frank McKenna)": "https://feeds.simplecast.com/geopolitics_with_frank_mckenna",
+    # Additional macro/finance podcasts
     "All-In Podcast": "https://feeds.megaphone.fm/all-in-with-chamath-jason-sacks-friedberg",
-    "Invest Like the Best": "https://feeds.megaphone.fm/investlikethebest",
     "Macro Voices": "https://feeds.megaphone.fm/macrovoices",
-    "Real Vision Daily Briefing": "https://feeds.megaphone.fm/realvision",
-    "The Prof G Pod": "https://feeds.megaphone.fm/profgpod",
+    "Invest Like the Best": "https://feeds.megaphone.fm/investlikethebest",
 }
 
 # EM Regions for analysis

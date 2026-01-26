@@ -43,6 +43,20 @@ EM_ASSET_CLASSES = [
     "EM Equities", "EM FX"
 ]
 
+# Topic categories for structured summaries
+TOPIC_CATEGORIES = {
+    "Market Outlook": ["outlook", "forecast", "expect", "predict", "2024", "2025", "next year", "going forward"],
+    "Monetary Policy": ["rate", "fed", "central bank", "inflation", "interest", "hiking", "cutting", "pause", "pivot"],
+    "Growth & Economy": ["gdp", "growth", "recession", "slowdown", "expansion", "economic", "economy"],
+    "Credit & Fixed Income": ["credit", "bond", "spread", "yield", "duration", "default", "high yield", "investment grade"],
+    "Currencies & FX": ["currency", "dollar", "fx", "depreciation", "appreciation", "exchange rate", "carry"],
+    "Equities": ["stock", "equity", "valuation", "earnings", "p/e", "multiple", "index"],
+    "Geopolitics & Policy": ["election", "political", "government", "regulation", "sanction", "trade war", "tariff"],
+    "China Focus": ["china", "chinese", "beijing", "xi", "property", "evergrande"],
+    "Commodities": ["oil", "commodity", "metal", "gold", "copper", "energy"],
+    "Risk Factors": ["risk", "concern", "worry", "downside", "volatility", "uncertainty"],
+}
+
 # ============================================================================
 # Page Configuration
 # ============================================================================
@@ -361,6 +375,160 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
         return {"error": f"Unexpected error: {str(e)[:100]}"}
 
 
+def extract_rss_from_listennotes(url: str) -> Dict[str, Any]:
+    """
+    Extract RSS feed URL from a Listen Notes podcast page.
+    Supports URLs like: https://www.listennotes.com/podcasts/podcast-name-id/
+    """
+    try:
+        # Check if it's a Listen Notes URL
+        if 'listennotes.com' not in url.lower():
+            return {"error": "Not a Listen Notes URL", "is_listennotes": False}
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        html_content = response.text
+
+        # Try to find RSS feed URL in the page
+        # Listen Notes typically has the RSS in a specific format
+        rss_patterns = [
+            r'href="(https?://[^"]*(?:feed|rss)[^"]*)"',
+            r'"rss_url":\s*"([^"]+)"',
+            r'<link[^>]*type="application/rss\+xml"[^>]*href="([^"]+)"',
+            r'data-rss="([^"]+)"',
+        ]
+
+        for pattern in rss_patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            for match in matches:
+                if match and 'listennotes' not in match.lower():
+                    return {
+                        "success": True,
+                        "rss_url": match,
+                        "is_listennotes": True
+                    }
+
+        # If we can't find RSS, return helpful message
+        return {
+            "error": "Could not extract RSS feed. Try clicking the RSS button on Listen Notes and copying the direct RSS URL.",
+            "is_listennotes": True
+        }
+
+    except requests.RequestException as e:
+        return {"error": f"Failed to fetch Listen Notes page: {str(e)[:100]}", "is_listennotes": True}
+    except Exception as e:
+        return {"error": f"Error processing URL: {str(e)[:100]}", "is_listennotes": True}
+
+
+def detect_and_process_url(url: str) -> Dict[str, Any]:
+    """
+    Intelligently detect URL type and process accordingly.
+    Handles: RSS feeds, Listen Notes URLs, Apple Podcasts, Spotify (with guidance)
+    """
+    url = url.strip()
+
+    if not url:
+        return {"error": "Please enter a URL"}
+
+    # Check for Listen Notes
+    if 'listennotes.com' in url.lower():
+        result = extract_rss_from_listennotes(url)
+        if result.get('success'):
+            return parse_podcast_feed(result['rss_url'])
+        return result
+
+    # Check for Apple Podcasts - provide guidance
+    if 'podcasts.apple.com' in url.lower():
+        return {
+            "error": "Apple Podcasts URLs don't contain RSS feeds directly. Please use Listen Notes to find the RSS feed for this podcast.",
+            "suggestion": "Go to listennotes.com, search for the podcast, and copy the RSS feed URL."
+        }
+
+    # Check for Spotify - provide guidance
+    if 'spotify.com' in url.lower():
+        return {
+            "error": "Spotify doesn't provide public RSS feeds. Please use Listen Notes to find the RSS feed for this podcast.",
+            "suggestion": "Go to listennotes.com, search for the podcast, and copy the RSS feed URL."
+        }
+
+    # Assume it's an RSS feed URL
+    return parse_podcast_feed(url)
+
+
+def parse_summary_into_topics(result: Dict[str, Any]) -> Dict[str, List[str]]:
+    """
+    Parse the podcast summary and details into topic-based bullet points.
+    Returns a dictionary with topic categories as keys and bullet points as values.
+    """
+    summary = result.get('podcast_summary', '')
+    details = result.get('podcast_details', '')
+    highlights = result.get('podcast_highlights', '')
+
+    # Combine all text for analysis
+    full_text = f"{summary} {details}"
+
+    # Split into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', full_text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+    # Categorize sentences into topics
+    categorized = {}
+    used_sentences = set()
+
+    for topic, keywords in TOPIC_CATEGORIES.items():
+        topic_sentences = []
+        for i, sentence in enumerate(sentences):
+            if i in used_sentences:
+                continue
+            sentence_lower = sentence.lower()
+            if any(kw in sentence_lower for kw in keywords):
+                # Clean up the sentence
+                clean_sentence = sentence.strip()
+                if clean_sentence and len(clean_sentence) > 30:
+                    topic_sentences.append(clean_sentence)
+                    used_sentences.add(i)
+
+        if topic_sentences:
+            # Limit to top 4 most relevant points per topic
+            categorized[topic] = topic_sentences[:4]
+
+    # Add highlights as "Key Takeaways" if not empty
+    if highlights:
+        highlight_list = [h.strip().lstrip('•-* ') for h in highlights.split('\n') if h.strip()]
+        if highlight_list:
+            categorized["Key Takeaways"] = highlight_list[:6]
+
+    # If we have uncategorized important sentences, add them to "Other Insights"
+    other_sentences = [sentences[i] for i in range(len(sentences))
+                       if i not in used_sentences and len(sentences[i]) > 50][:4]
+    if other_sentences:
+        categorized["Other Insights"] = other_sentences
+
+    return categorized
+
+
+def format_topics_as_markdown(topics: Dict[str, List[str]]) -> str:
+    """Format topic-based summary as markdown."""
+    if not topics:
+        return "No structured topics extracted."
+
+    md_parts = []
+    for topic, points in topics.items():
+        md_parts.append(f"### {topic}")
+        for point in points:
+            # Truncate very long points
+            if len(point) > 300:
+                point = point[:297] + "..."
+            md_parts.append(f"- {point}")
+        md_parts.append("")  # Empty line between sections
+
+    return "\n".join(md_parts)
+
+
 def process_podcast(audio_url: str) -> Dict[str, Any]:
     """Process a podcast episode using Modal backend or local sample data."""
     try:
@@ -563,8 +731,9 @@ def generate_markdown_export(episode_title: str, result: Dict[str, Any]) -> str:
 
 
 def generate_research_note(episode_title: str, result: Dict[str, Any],
-                           em_insights: Dict[str, Any], episode_info: Optional[Dict] = None) -> str:
-    """Generate a professional EM research note format."""
+                           em_insights: Dict[str, Any], episode_info: Optional[Dict] = None,
+                           topic_breakdown: Optional[Dict[str, List[str]]] = None) -> str:
+    """Generate a professional EM research note format with topic breakdown."""
     guest_name = result.get('podcast_guest', 'Unknown')
     guest_title = result.get('podcast_guest_title', '')
     guest_org = result.get('podcast_guest_org', '')
@@ -573,6 +742,20 @@ def generate_research_note(episode_title: str, result: Dict[str, Any],
     highlights = format_highlights(result.get('podcast_highlights', ''))
     takeaways = '\n'.join(f"{i+1}. {h.lstrip('•-* ').strip()}"
                           for i, h in enumerate(highlights) if h.strip())
+
+    # Format topic breakdown
+    topic_section = ""
+    if topic_breakdown:
+        topic_parts = []
+        for topic, points in topic_breakdown.items():
+            topic_parts.append(f"### {topic}")
+            for point in points[:4]:  # Limit to 4 points per topic
+                clean_point = point[:200] + "..." if len(point) > 200 else point
+                topic_parts.append(f"- {clean_point}")
+            topic_parts.append("")
+        topic_section = "\n".join(topic_parts)
+    else:
+        topic_section = "No structured topics extracted."
 
     note = f"""# EM Research Note: Podcast Summary
 ## {episode_title}
@@ -606,6 +789,12 @@ def generate_research_note(episode_title: str, result: Dict[str, Any],
 ## EXECUTIVE SUMMARY
 
 {result.get('podcast_summary', 'No summary available.')}
+
+---
+
+## DETAILED TOPIC BREAKDOWN
+
+{topic_section}
 
 ---
 
@@ -752,21 +941,20 @@ def render_sidebar():
             )
             feed_url = SAMPLE_PODCASTS[selected_sample]
 
-        else:  # RSS Feed URL
-            st.markdown("##### Enter RSS Feed")
-            feed_url = st.text_input(
-                "Paste RSS feed URL:",
-                placeholder="https://example.com/podcast/feed.xml",
-                help="Find RSS feeds on podcast platforms or Listen Notes"
+        else:  # RSS Feed URL or Listen Notes
+            st.markdown("##### 🔗 Paste Any Podcast URL")
+            user_url = st.text_input(
+                "Podcast URL:",
+                placeholder="RSS feed, Listen Notes, or podcast page URL",
+                help="Paste any podcast URL - we'll auto-detect the format!"
             )
 
-            with st.expander("💡 How to find RSS feeds"):
-                st.markdown("""
-                1. Go to [Listen Notes](https://www.listennotes.com/)
-                2. Search for your podcast
-                3. Click on the podcast page
-                4. Find the **RSS** button and copy the link
-                """)
+            # Show supported formats
+            st.caption("✅ Supported: RSS feeds, Listen Notes URLs")
+            st.caption("ℹ️ Apple/Spotify: We'll guide you to the RSS feed")
+
+            # Store for later processing
+            feed_url = user_url if user_url else None
 
         st.markdown("---")
 
@@ -797,15 +985,19 @@ def render_sidebar():
         # Fetch episodes button (for non-demo modes)
         elif st.button("🔍 Fetch Episodes", use_container_width=True, type="primary"):
             if feed_url:
-                with st.spinner("Fetching episodes..."):
-                    result = parse_podcast_feed(feed_url)
+                with st.spinner("Detecting URL type and fetching episodes..."):
+                    # Use smart URL detection
+                    result = detect_and_process_url(feed_url)
+
                     if "error" in result:
                         st.error(result["error"])
+                        if "suggestion" in result:
+                            st.info(f"💡 {result['suggestion']}")
                     else:
                         st.session_state.current_episodes = result
                         st.success(f"Found {len(result['episodes'])} episodes!")
             else:
-                st.warning("Please enter an RSS feed URL")
+                st.warning("Please enter a podcast URL")
 
         # Display episodes if available
         if st.session_state.current_episodes and "episodes" in st.session_state.current_episodes:
@@ -894,8 +1086,11 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
 
     st.markdown("---")
 
+    # Parse summary into topics
+    topic_breakdown = parse_summary_into_topics(result)
+
     # Create tabs for different views
-    tab1, tab2, tab3 = st.tabs(["📈 EM Analysis", "📝 Full Summary", "👤 Guest Info"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 EM Analysis", "📚 Topic Breakdown", "📝 Full Summary", "👤 Guest Info"])
 
     with tab1:
         # EM-focused analysis view
@@ -950,6 +1145,35 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
             st.caption(f"Bullish signals: {bull_score} | Bearish signals: {bear_score}")
 
     with tab2:
+        # Topic-based breakdown view
+        st.markdown("#### 📚 Summary by Topic")
+        st.caption("Key points organized by investment theme")
+
+        if topic_breakdown:
+            # Display topics in two columns for better layout
+            topic_items = list(topic_breakdown.items())
+            mid_point = (len(topic_items) + 1) // 2
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                for topic, points in topic_items[:mid_point]:
+                    with st.expander(f"**{topic}** ({len(points)} points)", expanded=True):
+                        for point in points:
+                            # Truncate very long points
+                            display_point = point[:250] + "..." if len(point) > 250 else point
+                            st.markdown(f"• {display_point}")
+
+            with col2:
+                for topic, points in topic_items[mid_point:]:
+                    with st.expander(f"**{topic}** ({len(points)} points)", expanded=True):
+                        for point in points:
+                            display_point = point[:250] + "..." if len(point) > 250 else point
+                            st.markdown(f"• {display_point}")
+        else:
+            st.info("No structured topics could be extracted from this episode.")
+
+    with tab3:
         # Full summary view
         col1, col2 = st.columns([2, 1])
 
@@ -966,7 +1190,7 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
             if episode_info and episode_info.get('image'):
                 st.image(episode_info['image'], use_container_width=True)
 
-    with tab3:
+    with tab4:
         # Guest information
         col1, col2 = st.columns([1, 2])
 
@@ -998,7 +1222,7 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
     export_cols = st.columns(3)
 
     # Generate professional research note
-    research_note = generate_research_note(episode_title, result, em_insights, episode_info)
+    research_note = generate_research_note(episode_title, result, em_insights, episode_info, topic_breakdown)
 
     with export_cols[0]:
         st.download_button(

@@ -294,11 +294,12 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
         # Parse XML
         root = ET.fromstring(response.content)
 
-        # Handle different RSS namespaces
+        # Handle different RSS namespaces (including Podcasting 2.0)
         namespaces = {
             'itunes': 'http://www.itunes.com/dtds/podcast-1.0.dtd',
             'media': 'http://search.yahoo.com/mrss/',
-            'content': 'http://purl.org/rss/1.0/modules/content/'
+            'content': 'http://purl.org/rss/1.0/modules/content/',
+            'podcast': 'https://podcastindex.org/namespace/1.0'
         }
 
         # Get channel info
@@ -355,6 +356,27 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
             # Get episode page URL (useful for transcript extraction)
             episode_link = item.findtext('link', '')
 
+            # Check for transcript URL (Podcasting 2.0 standard)
+            transcript_url = None
+            transcript_type = None
+
+            # Try podcast:transcript tag
+            transcript_elem = item.find('podcast:transcript', namespaces)
+            if transcript_elem is not None:
+                transcript_url = transcript_elem.get('url')
+                transcript_type = transcript_elem.get('type', 'text/plain')
+
+            # Also check for multiple transcript elements and prefer SRT/VTT
+            for trans in item.findall('podcast:transcript', namespaces):
+                t_type = trans.get('type', '')
+                t_url = trans.get('url')
+                if t_url:
+                    # Prefer text formats over JSON
+                    if 'srt' in t_type or 'vtt' in t_type or 'text' in t_type:
+                        transcript_url = t_url
+                        transcript_type = t_type
+                        break
+
             if audio_url:  # Only add if we have an audio URL
                 episodes[title] = {
                     'audio_url': audio_url,
@@ -362,7 +384,9 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
                     'description': description,
                     'published': published,
                     'podcast_title': podcast_title,
-                    'link': episode_link
+                    'link': episode_link,
+                    'transcript_url': transcript_url,
+                    'transcript_type': transcript_type
                 }
 
         if not episodes:
@@ -649,6 +673,86 @@ def search_listennotes_for_episode(podcast_name: str, episode_title: str) -> Opt
         return None
 
 
+def fetch_transcript_from_url(transcript_url: str, transcript_type: str = None) -> Optional[str]:
+    """
+    Fetch and parse transcript from a direct URL (from RSS feed).
+    Supports SRT, VTT, JSON, and plain text formats.
+    """
+    if not transcript_url:
+        return None
+
+    try:
+        headers = {'User-Agent': 'PodcastGPT/1.0'}
+        response = requests.get(transcript_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        content = response.text
+
+        # Determine format from type or URL
+        fmt = transcript_type or ''
+        url_lower = transcript_url.lower()
+
+        # Parse SRT format
+        if 'srt' in fmt or url_lower.endswith('.srt'):
+            # Remove timecodes and indices, keep just text
+            lines = content.split('\n')
+            text_lines = []
+            for line in lines:
+                line = line.strip()
+                # Skip empty lines, numbers, and timecodes
+                if not line or line.isdigit() or '-->' in line:
+                    continue
+                text_lines.append(line)
+            return ' '.join(text_lines)
+
+        # Parse VTT format
+        elif 'vtt' in fmt or url_lower.endswith('.vtt'):
+            lines = content.split('\n')
+            text_lines = []
+            for line in lines:
+                line = line.strip()
+                # Skip headers, empty lines, and timecodes
+                if not line or line.startswith('WEBVTT') or '-->' in line or line.startswith('NOTE'):
+                    continue
+                # Skip cue identifiers (lines that are just numbers or have :: in them)
+                if line.isdigit() or '::' in line:
+                    continue
+                text_lines.append(line)
+            return ' '.join(text_lines)
+
+        # Parse JSON format (various schemas)
+        elif 'json' in fmt or url_lower.endswith('.json'):
+            try:
+                data = json.loads(content)
+                # Handle different JSON transcript formats
+                if isinstance(data, list):
+                    # Array of segments
+                    texts = [seg.get('text', seg.get('body', '')) for seg in data if isinstance(seg, dict)]
+                    return ' '.join(texts)
+                elif isinstance(data, dict):
+                    # Object with segments/results array
+                    segments = data.get('segments', data.get('results', data.get('transcript', [])))
+                    if isinstance(segments, list):
+                        texts = [seg.get('text', seg.get('body', '')) for seg in segments if isinstance(seg, dict)]
+                        return ' '.join(texts)
+                    elif isinstance(segments, str):
+                        return segments
+            except json.JSONDecodeError:
+                pass
+
+        # Plain text or HTML
+        else:
+            # Strip HTML tags if present
+            clean_text = re.sub(r'<[^>]+>', ' ', content)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            if len(clean_text) > 100:  # Sanity check
+                return clean_text
+
+        return None
+
+    except Exception as e:
+        return None
+
+
 def extract_transcript_from_episode_page(episode_url: str) -> Optional[str]:
     """
     Try to extract transcript from various podcast platforms.
@@ -848,11 +952,14 @@ Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates
 
 
 def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
-                    podcast_name: Optional[str] = None, episode_title: Optional[str] = None) -> Dict[str, Any]:
+                    podcast_name: Optional[str] = None, episode_title: Optional[str] = None,
+                    transcript_url: Optional[str] = None, transcript_type: Optional[str] = None) -> Dict[str, Any]:
     """Process a podcast episode using OpenAI (Whisper + GPT).
 
-    First checks for existing transcript on podcast platforms (Listen Notes, etc.).
-    Falls back to Whisper transcription if no transcript is found.
+    Transcript sources (in order of priority):
+    1. RSS feed transcript URL (podcast:transcript tag) - most reliable
+    2. Listen Notes transcript (if URL provided or found via search)
+    3. Whisper transcription (fallback)
     """
 
     # Check for OpenAI API key
@@ -870,23 +977,29 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
 
     transcript = None
 
-    # Step 1: Try to find existing transcript (free and instant)
-    # First, check if we have a Listen Notes URL
-    if episode_page_url and 'listennotes.com' in episode_page_url.lower():
+    # Step 1: Check RSS feed transcript URL (most reliable source)
+    if transcript_url:
+        st.info("Found transcript in RSS feed, fetching...")
+        transcript = fetch_transcript_from_url(transcript_url, transcript_type)
+        if transcript:
+            st.success("Loaded transcript from podcast feed!")
+
+    # Step 2: Try Listen Notes if we have a URL
+    if not transcript and episode_page_url and 'listennotes.com' in episode_page_url.lower():
         st.info("Checking Listen Notes for transcript...")
         transcript = extract_transcript_from_episode_page(episode_page_url)
 
-    # If no Listen Notes URL provided, try to search for the episode
+    # Step 3: Search Listen Notes for the episode
     if not transcript and podcast_name and episode_title:
         st.info("Searching Listen Notes for episode...")
         ln_url = search_listennotes_for_episode(podcast_name, episode_title)
         if ln_url:
-            st.info(f"Found on Listen Notes, checking for transcript...")
+            st.info("Found on Listen Notes, checking for transcript...")
             transcript = extract_listennotes_transcript(ln_url)
             if transcript:
                 st.success("Found transcript on Listen Notes!")
 
-    # Try the provided URL if it's not Listen Notes (maybe has transcript)
+    # Step 4: Try the provided URL if it's not Listen Notes
     if not transcript and episode_page_url and 'listennotes.com' not in episode_page_url.lower():
         transcript = extract_transcript_from_episode_page(episode_page_url)
 
@@ -1414,6 +1527,12 @@ def render_sidebar():
                 if ep_info.get('description'):
                     st.caption(ep_info['description'][:100] + "...")
 
+                # Show transcript availability
+                if ep_info.get('transcript_url'):
+                    st.success("✓ Transcript available in RSS feed (free & instant!)")
+                else:
+                    st.caption("No RSS transcript - will search Listen Notes or use Whisper")
+
                 # Optional Listen Notes URL for transcript
                 with st.expander("📝 Have Listen Notes URL? (optional)", expanded=False):
                     ln_url = st.text_input(
@@ -1810,11 +1929,17 @@ def main():
                     # Pass podcast and episode names for auto-search
                     podcast_name = episode_info.get('podcast_title', '')
                     episode_title = st.session_state.selected_episode
+                    # Get transcript URL from RSS feed if available
+                    transcript_url = episode_info.get('transcript_url')
+                    transcript_type = episode_info.get('transcript_type')
+
                     result = process_podcast(
                         audio_url,
                         episode_page_url,
                         podcast_name,
-                        episode_title
+                        episode_title,
+                        transcript_url,
+                        transcript_type
                     )
                     # Clear the Listen Notes URL after processing
                     st.session_state.episode_listennotes_url = None

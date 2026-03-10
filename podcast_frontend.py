@@ -1538,8 +1538,6 @@ def render_sidebar():
         )
 
         feed_url = None
-
-        feed_url = None
         use_demo = False
 
         if input_method == "Demo Mode (Offline)":

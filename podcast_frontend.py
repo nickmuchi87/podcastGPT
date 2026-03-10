@@ -14,7 +14,12 @@ from typing import Optional, Dict, Any, List
 import time
 import tempfile
 from openai import OpenAI, APIError, RateLimitError, APIConnectionError
-from pydub import AudioSegment
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except (ImportError, OSError):
+    PYDUB_AVAILABLE = False
+    AudioSegment = None
 
 # ============================================================================
 # Configuration & Constants
@@ -349,7 +354,8 @@ def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
             # Get description
             description = item.findtext('description', '')
             if not description:
-                description = item.findtext('itunes:summary', namespaces) or ''
+                itunes_summary = item.find('itunes:summary', namespaces)
+                description = (itunes_summary.text if itunes_summary is not None else '') or ''
             # Clean HTML tags and truncate
             description = re.sub(r'<[^>]+>', '', description)[:200]
 
@@ -876,6 +882,9 @@ def split_audio_into_chunks(audio_path: str, chunk_duration_ms: int = 600000) ->
     Split audio file into chunks for Whisper API (25MB limit).
     Default chunk is 10 minutes (600000ms) which typically stays under 25MB.
     """
+    if not PYDUB_AVAILABLE:
+        # Without pydub/ffmpeg, send file as-is and let Whisper handle it
+        return [audio_path] if os.path.exists(audio_path) else []
     chunk_paths = []
     try:
         # Load audio file

@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 import time
 import tempfile
-from openai import OpenAI
+from openai import OpenAI, APIError, RateLimitError, APIConnectionError
 from pydub import AudioSegment
 
 # ============================================================================
@@ -276,11 +276,15 @@ def init_session_state():
     if 'episode_listennotes_url' not in st.session_state:
         st.session_state.episode_listennotes_url = None
 
+    if 'processing_start_time' not in st.session_state:
+        st.session_state.processing_start_time = None
+
 
 # ============================================================================
 # Utility Functions
 # ============================================================================
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def parse_podcast_feed(feed_url: str) -> Dict[str, Any]:
     """Parse a podcast RSS feed and extract episode information using requests + XML."""
     try:
@@ -439,6 +443,7 @@ def extract_rss_from_listennotes(url: str) -> Dict[str, Any]:
         return {"error": f"Error processing URL: {str(e)[:100]}", "is_listennotes": True}
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def detect_and_process_url(url: str) -> Dict[str, Any]:
     """
     Intelligently detect URL type and process accordingly.
@@ -666,32 +671,59 @@ def extract_transcript_from_episode_page(episode_url: str) -> Optional[str]:
     return None
 
 
-def download_audio(audio_url: str) -> Optional[str]:
-    """Download audio file to a temporary location."""
-    try:
-        headers = {'User-Agent': 'PodcastGPT/1.0'}
-        response = requests.get(audio_url, headers=headers, stream=True, timeout=120)
-        response.raise_for_status()
+def download_audio(audio_url: str, max_retries: int = 2) -> Optional[str]:
+    """Download audio file to a temporary location with retry support."""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            headers = {'User-Agent': 'PodcastGPT/1.0'}
+            timeout = 120 + (attempt * 60)  # Extend timeout on retries
+            response = requests.get(audio_url, headers=headers, stream=True, timeout=timeout)
+            response.raise_for_status()
 
-        # Determine file type from content-type or URL
-        content_type = response.headers.get('content-type', '')
-        if 'audio/mp4' in content_type or 'm4a' in audio_url:
-            suffix = '.m4a'
-        elif 'audio/wav' in content_type:
-            suffix = '.wav'
-        elif 'audio/ogg' in content_type:
-            suffix = '.ogg'
-        else:
-            suffix = '.mp3'
+            # Determine file type from content-type or URL
+            content_type = response.headers.get('content-type', '')
+            if 'audio/mp4' in content_type or 'm4a' in audio_url:
+                suffix = '.m4a'
+            elif 'audio/wav' in content_type:
+                suffix = '.wav'
+            elif 'audio/ogg' in content_type:
+                suffix = '.ogg'
+            else:
+                suffix = '.mp3'
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            for chunk in response.iter_content(chunk_size=8192):
-                tmp_file.write(chunk)
-            return tmp_file.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+                downloaded = 0
+                for chunk in response.iter_content(chunk_size=8192):
+                    tmp_file.write(chunk)
+                    downloaded += len(chunk)
+                return tmp_file.name
 
-    except Exception as e:
-        st.error(f"Failed to download audio: {str(e)[:100]}")
-        return None
+        except requests.exceptions.Timeout:
+            last_error = "Download timed out - the audio file may be very large."
+            if attempt < max_retries:
+                st.warning(f"Download timed out, retrying with longer timeout (attempt {attempt + 2}/{max_retries + 1})...")
+                time.sleep(2 * (attempt + 1))
+        except requests.exceptions.ConnectionError:
+            last_error = "Connection failed - check your network connection."
+            if attempt < max_retries:
+                st.warning(f"Connection failed, retrying (attempt {attempt + 2}/{max_retries + 1})...")
+                time.sleep(2 * (attempt + 1))
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 'unknown'
+            if status == 404:
+                st.error("Audio file not found (404). The episode may have been removed.")
+            elif status == 403:
+                st.error("Access denied (403). This podcast may restrict automated downloads.")
+            else:
+                st.error(f"Server error ({status}). Try again later.")
+            return None
+        except Exception as e:
+            last_error = str(e)[:150]
+            break
+
+    st.error(f"Failed to download audio after {max_retries + 1} attempts: {last_error}")
+    return None
 
 
 def split_audio_into_chunks(audio_path: str, chunk_duration_ms: int = 600000) -> List[str]:
@@ -763,8 +795,17 @@ def transcribe_audio(client: OpenAI, audio_path: str) -> Optional[str]:
         # Combine all transcripts
         return " ".join(transcripts)
 
+    except RateLimitError:
+        st.error("OpenAI rate limit reached. Please wait a minute and try again, or check your API usage limits.")
+        return None
+    except APIConnectionError:
+        st.error("Could not connect to OpenAI API. Check your network connection.")
+        return None
+    except APIError as e:
+        st.error(f"OpenAI API error: {str(e)[:150]}")
+        return None
     except Exception as e:
-        st.error(f"Transcription failed: {str(e)[:100]}")
+        st.error(f"Transcription failed: {str(e)[:150]}")
         return None
     finally:
         # Clean up all temp files
@@ -781,6 +822,7 @@ def generate_em_summary(client: OpenAI, transcript: str) -> Dict[str, Any]:
     # Truncate transcript if too long (GPT-4 context limit)
     max_chars = 100000
     if len(transcript) > max_chars:
+        st.warning(f"Transcript is very long ({len(transcript):,} chars) - analyzing first {max_chars:,} characters.")
         transcript = transcript[:max_chars] + "... [truncated]"
 
     prompt = f"""You are an expert analyst helping Emerging Markets Portfolio Managers extract actionable insights from podcasts.
@@ -871,20 +913,20 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
     transcript = None
 
     # Step 1: Try to find existing transcript (free and instant)
+    update_progress("🔍 Searching for existing transcript...", 0.05)
+
     # First, check if we have a Listen Notes URL
     if episode_page_url and 'listennotes.com' in episode_page_url.lower():
-        st.info("Checking Listen Notes for transcript...")
         transcript = extract_transcript_from_episode_page(episode_page_url)
 
     # If no Listen Notes URL provided, try to search for the episode
     if not transcript and podcast_name and episode_title:
-        st.info("Searching Listen Notes for episode...")
+        update_progress("🔍 Searching Listen Notes for transcript...", 0.10)
         ln_url = search_listennotes_for_episode(podcast_name, episode_title)
         if ln_url:
-            st.info(f"Found on Listen Notes, checking for transcript...")
             transcript = extract_listennotes_transcript(ln_url)
             if transcript:
-                st.success("Found transcript on Listen Notes!")
+                st.toast("Found existing transcript - skipping audio download!")
 
     # Try the provided URL if it's not Listen Notes (maybe has transcript)
     if not transcript and episode_page_url and 'listennotes.com' not in episode_page_url.lower():
@@ -892,8 +934,7 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
 
     # Step 2: Fall back to Whisper transcription if no existing transcript
     if not transcript:
-        # Download audio
-        st.info("Downloading podcast audio...")
+        update_progress("📥 Downloading podcast audio...", 0.15)
         audio_path = download_audio(audio_url)
         if not audio_path:
             return {
@@ -906,8 +947,7 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
                 "_is_fallback": True
             }
 
-        # Transcribe with Whisper
-        st.info("Transcribing with OpenAI Whisper...")
+        update_progress("🎤 Transcribing with OpenAI Whisper (this may take a few minutes)...", 0.30)
         transcript = transcribe_audio(client, audio_path)
         if not transcript:
             return {
@@ -921,8 +961,9 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
             }
 
     # Generate EM-focused summary with GPT
-    st.info("Generating EM Portfolio Manager analysis...")
+    update_progress("🤖 Generating EM Portfolio Manager analysis...", 0.75)
     result = generate_em_summary(client, transcript)
+    update_progress("✅ Analysis complete!", 1.0)
 
     # Add transcript to details if not present
     if not result.get('podcast_details'):
@@ -1253,6 +1294,7 @@ def render_header():
     """, unsafe_allow_html=True)
 
 
+@st.cache_data(show_spinner=False)
 def load_demo_data() -> Optional[Dict[str, Any]]:
     """Load demo data from local JSON files."""
     demo_files = {
@@ -1266,6 +1308,13 @@ def load_demo_data() -> Optional[Dict[str, Any]]:
             available_demos[name] = filepath
 
     return available_demos if available_demos else None
+
+
+@st.cache_data(show_spinner=False)
+def _load_demo_json(filepath: str) -> Dict[str, Any]:
+    """Load and cache demo JSON data."""
+    with open(filepath, 'r') as f:
+        return json.load(f)
 
 
 def render_sidebar():
@@ -1356,8 +1405,7 @@ def render_sidebar():
             if st.button("📊 Load Demo Analysis", use_container_width=True, type="primary"):
                 filepath = demo_data[selected_demo]
                 try:
-                    with open(filepath, 'r') as f:
-                        result = json.load(f)
+                    result = _load_demo_json(filepath)
                     st.session_state.last_result = result
                     st.session_state.selected_episode = selected_demo
                     st.session_state.current_episodes = {
@@ -1370,7 +1418,7 @@ def render_sidebar():
                         }
                     }
                     add_to_history(selected_demo, "Demo", result)
-                    st.success("Demo loaded!")
+                    st.toast("Demo analysis loaded!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to load demo: {str(e)}")
@@ -1388,7 +1436,7 @@ def render_sidebar():
                             st.info(f"💡 {result['suggestion']}")
                     else:
                         st.session_state.current_episodes = result
-                        st.success(f"Found {len(result['episodes'])} episodes!")
+                        st.toast(f"Found {len(result['episodes'])} episodes from {result.get('podcast_title', 'podcast')}!")
             else:
                 st.warning("Please enter a podcast URL")
 
@@ -1403,7 +1451,7 @@ def render_sidebar():
             selected = st.selectbox(
                 "Select an episode:",
                 options=episode_titles,
-                format_func=lambda x: x[:50] + "..." if len(x) > 50 else x
+                format_func=lambda x: x[:80] + "..." if len(x) > 80 else x
             )
 
             if selected:
@@ -1428,10 +1476,26 @@ def render_sidebar():
                     else:
                         st.session_state.episode_listennotes_url = None
 
-                # Process button
-                if st.button("🚀 Process Episode", use_container_width=True, type="primary"):
-                    st.session_state.processing = True
-                    st.rerun()
+                # Show if already cached
+                ep_cache_key = f"{ep_info.get('podcast_title', '')}::{selected}"
+                already_processed = ep_cache_key in st.session_state.processed_podcasts
+
+                if already_processed:
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        if st.button("📊 View Cached Result", use_container_width=True, type="primary"):
+                            st.session_state.last_result = st.session_state.processed_podcasts[ep_cache_key]
+                            st.rerun()
+                    with col_btn2:
+                        if st.button("🔄 Re-process", use_container_width=True):
+                            del st.session_state.processed_podcasts[ep_cache_key]
+                            st.session_state.processing = True
+                            st.rerun()
+                else:
+                    if st.button("🚀 Process Episode", use_container_width=True, type="primary"):
+                        st.session_state.processing = True
+                        st.session_state.processing_start_time = time.time()
+                        st.rerun()
 
         # History section
         if st.session_state.history:
@@ -1568,16 +1632,15 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
             col1, col2 = st.columns(2)
 
             with col1:
-                for topic, points in topic_items[:mid_point]:
-                    with st.expander(f"**{topic}** ({len(points)} points)", expanded=True):
+                for idx, (topic, points) in enumerate(topic_items[:mid_point]):
+                    with st.expander(f"**{topic}** ({len(points)} points)", expanded=idx < 2):
                         for point in points:
-                            # Truncate very long points
                             display_point = point[:250] + "..." if len(point) > 250 else point
                             st.markdown(f"• {display_point}")
 
             with col2:
-                for topic, points in topic_items[mid_point:]:
-                    with st.expander(f"**{topic}** ({len(points)} points)", expanded=True):
+                for idx, (topic, points) in enumerate(topic_items[mid_point:]):
+                    with st.expander(f"**{topic}** ({len(points)} points)", expanded=idx < 1):
                         for point in points:
                             display_point = point[:250] + "..." if len(point) > 250 else point
                             st.markdown(f"• {display_point}")
@@ -1750,32 +1813,38 @@ def render_home():
 
 
 def render_processing_screen():
-    """Render the processing screen with progress indicators."""
+    """Render the processing screen with real progress tracking."""
     st.markdown("### 🔄 Processing Podcast...")
+    st.caption(f"Episode: {st.session_state.selected_episode}")
 
-    progress_container = st.empty()
-    status_container = st.empty()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    steps = [
-        ("📥 Fetching audio...", 0.2),
-        ("🎤 Transcribing content...", 0.5),
-        ("🤖 Analyzing with AI...", 0.7),
-        ("📝 Generating summary...", 0.9),
-        ("✅ Complete!", 1.0),
-    ]
+    # Cancel button
+    if st.button("Cancel Processing", type="secondary"):
+        st.session_state.processing = False
+        st.toast("Processing cancelled.")
+        st.rerun()
 
-    progress_bar = progress_container.progress(0)
-
-    for step_text, progress in steps:
-        status_container.markdown(f"""
-        <div class="status-processing">
-            {step_text}
-        </div>
-        """, unsafe_allow_html=True)
-        progress_bar.progress(progress)
-        time.sleep(0.5)  # Simulate processing steps
+    # Store progress containers in session state so process_podcast can update them
+    st.session_state._progress_bar = progress_bar
+    st.session_state._status_text = status_text
 
     return True
+
+
+def update_progress(step: str, progress: float):
+    """Update the processing progress bar and status text."""
+    progress_bar = st.session_state.get('_progress_bar')
+    status_text = st.session_state.get('_status_text')
+    if progress_bar:
+        progress_bar.progress(progress)
+    if status_text:
+        status_text.markdown(f"""
+        <div class="status-processing">
+            {step}
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # ============================================================================
@@ -1798,35 +1867,55 @@ def main():
             episodes = st.session_state.current_episodes.get("episodes", {})
             episode_info = episodes.get(st.session_state.selected_episode, {})
             audio_url = episode_info.get('audio_url', '')
+            episode_title = st.session_state.selected_episode
 
-            if audio_url:
-                with st.spinner("Finalizing..."):
-                    # Use Listen Notes URL if provided, otherwise try RSS link
-                    episode_page_url = (
-                        st.session_state.get('episode_listennotes_url') or
-                        episode_info.get('link') or
-                        episode_info.get('page_url')
-                    )
-                    # Pass podcast and episode names for auto-search
-                    podcast_name = episode_info.get('podcast_title', '')
-                    episode_title = st.session_state.selected_episode
-                    result = process_podcast(
-                        audio_url,
-                        episode_page_url,
-                        podcast_name,
-                        episode_title
-                    )
-                    # Clear the Listen Notes URL after processing
-                    st.session_state.episode_listennotes_url = None
-                    st.session_state.last_result = result
-                    st.session_state.processing = False
+            # Check if we already processed this episode (deduplication)
+            cache_key = f"{episode_info.get('podcast_title', '')}::{episode_title}"
+            cached_result = st.session_state.processed_podcasts.get(cache_key)
 
-                    # Add to history
-                    add_to_history(
-                        st.session_state.selected_episode,
-                        episode_info.get('podcast_title', 'Unknown Podcast'),
-                        result
-                    )
+            if cached_result:
+                st.toast("Loaded from cache - this episode was already analyzed!")
+                st.session_state.last_result = cached_result
+                st.session_state.processing = False
+                st.rerun()
+
+            elif audio_url:
+                # Use Listen Notes URL if provided, otherwise try RSS link
+                episode_page_url = (
+                    st.session_state.get('episode_listennotes_url') or
+                    episode_info.get('link') or
+                    episode_info.get('page_url')
+                )
+                # Pass podcast and episode names for auto-search
+                podcast_name = episode_info.get('podcast_title', '')
+                result = process_podcast(
+                    audio_url,
+                    episode_page_url,
+                    podcast_name,
+                    episode_title
+                )
+                # Clear the Listen Notes URL after processing
+                st.session_state.episode_listennotes_url = None
+                st.session_state.last_result = result
+                st.session_state.processing = False
+
+                # Cache the result for deduplication
+                st.session_state.processed_podcasts[cache_key] = result
+
+                # Record elapsed time
+                if st.session_state.processing_start_time:
+                    elapsed = time.time() - st.session_state.processing_start_time
+                    mins, secs = divmod(int(elapsed), 60)
+                    time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                    st.toast(f"Analysis complete in {time_str}!")
+                    st.session_state.processing_start_time = None
+
+                # Add to history
+                add_to_history(
+                    episode_title,
+                    episode_info.get('podcast_title', 'Unknown Podcast'),
+                    result
+                )
 
                 st.rerun()
             else:
@@ -1847,12 +1936,22 @@ def main():
             episode_info
         )
 
-        # Clear button
+        # Navigation buttons
         st.markdown("---")
-        if st.button("🔄 Process Another Episode", use_container_width=True):
-            st.session_state.last_result = None
-            st.session_state.selected_episode = None
-            st.rerun()
+        nav_col1, nav_col2 = st.columns(2)
+        with nav_col1:
+            if st.button("🔄 Process Another Episode", use_container_width=True):
+                st.session_state.last_result = None
+                st.session_state.selected_episode = None
+                st.rerun()
+        with nav_col2:
+            if st.session_state.history and len(st.session_state.history) > 1:
+                if st.button("📚 View Last Analysis", use_container_width=True):
+                    # Load the second-most-recent history entry (first is current)
+                    prev = st.session_state.history[1]
+                    st.session_state.last_result = prev['full_result']
+                    st.session_state.selected_episode = prev['episode_title']
+                    st.rerun()
 
     else:
         # Home screen

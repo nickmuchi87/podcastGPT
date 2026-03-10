@@ -654,19 +654,164 @@ def search_listennotes_for_episode(podcast_name: str, episode_title: str) -> Opt
         return None
 
 
+def extract_transcript_from_webpage(url: str) -> Optional[str]:
+    """
+    Scrape a webpage (episode page, show notes, blog post) for transcript content.
+    Works with podcast websites that publish transcripts alongside episodes.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
+        html = response.text
+
+        # Method 1: Look for structured transcript containers
+        transcript_container_patterns = [
+            # Common transcript div/section patterns
+            r'<div[^>]*class="[^"]*transcript[^"]*"[^>]*>(.*?)</div>',
+            r'<section[^>]*class="[^"]*transcript[^"]*"[^>]*>(.*?)</section>',
+            r'<div[^>]*id="transcript[^"]*"[^>]*>(.*?)</div>',
+            r'<section[^>]*id="transcript[^"]*"[^>]*>(.*?)</section>',
+            # Show notes / episode content that often contains transcripts
+            r'<div[^>]*class="[^"]*show-notes[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*episode-content[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*post-content[^"]*"[^>]*>(.*?)</div>',
+            r'<article[^>]*>(.*?)</article>',
+        ]
+
+        for pattern in transcript_container_patterns:
+            matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                clean_text = re.sub(r'<[^>]+>', ' ', match)
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                # A real transcript is typically > 1000 chars
+                if len(clean_text) > 1000:
+                    return clean_text
+
+        # Method 2: Check JSON-LD structured data for transcript
+        json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
+        json_ld_matches = re.findall(json_ld_pattern, html, re.DOTALL)
+        for match in json_ld_matches:
+            try:
+                data = json.loads(match)
+                if isinstance(data, dict):
+                    if 'transcript' in data:
+                        return data['transcript']
+                    if 'articleBody' in data and len(data['articleBody']) > 1000:
+                        return data['articleBody']
+                    if 'text' in data and len(data['text']) > 1000:
+                        return data['text']
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Method 3: Look for a "transcript" heading followed by content
+        # Many podcasts put transcript under an <h2>Transcript</h2> or similar
+        transcript_heading_pattern = r'<h[1-4][^>]*>[^<]*transcript[^<]*</h[1-4]>\s*(.*?)(?=<h[1-4]|<footer|</article|</main|$)'
+        heading_matches = re.findall(transcript_heading_pattern, html, re.DOTALL | re.IGNORECASE)
+        for match in heading_matches:
+            clean_text = re.sub(r'<[^>]+>', ' ', match)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            if len(clean_text) > 1000:
+                return clean_text
+
+        return None
+
+    except Exception:
+        return None
+
+
+def search_web_for_transcript(podcast_name: str, episode_title: str) -> Optional[str]:
+    """
+    Search the web for an existing transcript of the podcast episode.
+    Tries common transcript aggregator sites and general search.
+    """
+    # Clean up search terms
+    clean_podcast = re.sub(r'[^\w\s]', '', podcast_name).strip()
+    clean_episode = re.sub(r'[^\w\s]', '', episode_title).strip()
+    # Use first 8 words of episode title to keep query focused
+    clean_episode_short = ' '.join(clean_episode.split()[:8])
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+
+    # Strategy 1: Search common transcript/podcast sites via Google
+    search_queries = [
+        f"{clean_podcast} {clean_episode_short} transcript",
+        f"{clean_podcast} {clean_episode_short} full transcript text",
+    ]
+
+    for query in search_queries:
+        try:
+            search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}"
+            response = requests.get(search_url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                continue
+
+            html = response.text
+
+            # Extract URLs from search results
+            url_pattern = r'<a[^>]+href="/url\?q=(https?://[^"&]+)'
+            result_urls = re.findall(url_pattern, html)
+
+            # Also try direct href patterns
+            if not result_urls:
+                url_pattern2 = r'href="(https?://(?:www\.)?[^"]+)"'
+                result_urls = re.findall(url_pattern2, html)
+
+            # Filter to likely transcript pages, skip Google/search engine URLs
+            skip_domains = ['google.com', 'youtube.com', 'facebook.com', 'twitter.com',
+                           'instagram.com', 'tiktok.com', 'reddit.com', 'wikipedia.org',
+                           'apple.com/podcasts', 'spotify.com']
+
+            transcript_urls = []
+            for url in result_urls:
+                url_lower = url.lower()
+                if any(domain in url_lower for domain in skip_domains):
+                    continue
+                # Prioritize URLs that look like transcript pages
+                if any(kw in url_lower for kw in ['transcript', 'show-notes', 'episode', 'podcast']):
+                    transcript_urls.insert(0, url)
+                else:
+                    transcript_urls.append(url)
+
+            # Try the top 3 most promising URLs
+            for url in transcript_urls[:3]:
+                try:
+                    transcript = extract_transcript_from_webpage(url)
+                    if transcript:
+                        return transcript
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    return None
+
+
 def extract_transcript_from_episode_page(episode_url: str) -> Optional[str]:
     """
-    Try to extract transcript from various podcast platforms.
+    Try to extract transcript from a podcast episode page.
+    Handles Listen Notes, podcast websites, and general webpages.
     Returns transcript text if found, None otherwise.
     """
-    # Try Listen Notes
+    if not episode_url:
+        return None
+
+    # Try Listen Notes specifically
     if 'listennotes.com' in episode_url.lower():
         transcript = extract_listennotes_transcript(episode_url)
         if transcript:
-            st.success("Found existing transcript on Listen Notes!")
             return transcript
 
-    # Could add more platforms here (Spotify, Apple, etc.)
+    # Try scraping the episode's own webpage for transcript
+    transcript = extract_transcript_from_webpage(episode_url)
+    if transcript:
+        return transcript
 
     return None
 
@@ -911,30 +1056,53 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
         }
 
     transcript = None
+    transcript_source = None
 
-    # Step 1: Try to find existing transcript (free and instant)
-    update_progress("🔍 Searching for existing transcript...", 0.05)
+    # =====================================================================
+    # Step 1: Search for existing transcripts (free and fast)
+    # Try multiple sources before falling back to expensive Whisper
+    # =====================================================================
 
-    # First, check if we have a Listen Notes URL
-    if episode_page_url and 'listennotes.com' in episode_page_url.lower():
+    # 1a. Check user-provided Listen Notes URL
+    if not transcript and episode_page_url and 'listennotes.com' in episode_page_url.lower():
+        update_progress("🔍 Checking Listen Notes for transcript...", 0.05)
+        transcript = extract_listennotes_transcript(episode_page_url)
+        if transcript:
+            transcript_source = "Listen Notes (provided URL)"
+
+    # 1b. Check the episode's own webpage (from RSS link field)
+    if not transcript and episode_page_url and 'listennotes.com' not in episode_page_url.lower():
+        update_progress("🔍 Checking episode webpage for transcript...", 0.08)
         transcript = extract_transcript_from_episode_page(episode_page_url)
+        if transcript:
+            transcript_source = "episode webpage"
 
-    # If no Listen Notes URL provided, try to search for the episode
+    # 1c. Search Listen Notes for the episode
     if not transcript and podcast_name and episode_title:
-        update_progress("🔍 Searching Listen Notes for transcript...", 0.10)
+        update_progress("🔍 Searching Listen Notes for transcript...", 0.12)
         ln_url = search_listennotes_for_episode(podcast_name, episode_title)
         if ln_url:
             transcript = extract_listennotes_transcript(ln_url)
             if transcript:
-                st.toast("Found existing transcript - skipping audio download!")
+                transcript_source = "Listen Notes (auto-search)"
 
-    # Try the provided URL if it's not Listen Notes (maybe has transcript)
-    if not transcript and episode_page_url and 'listennotes.com' not in episode_page_url.lower():
-        transcript = extract_transcript_from_episode_page(episode_page_url)
+    # 1d. Search the web for an existing transcript
+    if not transcript and podcast_name and episode_title:
+        update_progress("🌐 Searching the web for existing transcript...", 0.18)
+        transcript = search_web_for_transcript(podcast_name, episode_title)
+        if transcript:
+            transcript_source = "web search"
 
+    # Notify user if transcript was found
+    if transcript and transcript_source:
+        st.toast(f"Found existing transcript via {transcript_source} - skipping audio transcription!")
+        update_progress(f"✅ Transcript found via {transcript_source}!", 0.30)
+
+    # =====================================================================
     # Step 2: Fall back to Whisper transcription if no existing transcript
+    # =====================================================================
     if not transcript:
-        update_progress("📥 Downloading podcast audio...", 0.15)
+        update_progress("📥 No transcript found online. Downloading podcast audio...", 0.25)
         audio_path = download_audio(audio_url)
         if not audio_path:
             return {
@@ -947,7 +1115,7 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
                 "_is_fallback": True
             }
 
-        update_progress("🎤 Transcribing with OpenAI Whisper (this may take a few minutes)...", 0.30)
+        update_progress("🎤 Transcribing with OpenAI Whisper (this may take a few minutes)...", 0.40)
         transcript = transcribe_audio(client, audio_path)
         if not transcript:
             return {
@@ -959,6 +1127,7 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
                 "podcast_details": "",
                 "_is_fallback": True
             }
+        transcript_source = "Whisper transcription"
 
     # Generate EM-focused summary with GPT
     update_progress("🤖 Generating EM Portfolio Manager analysis...", 0.75)
@@ -968,6 +1137,9 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
     # Add transcript to details if not present
     if not result.get('podcast_details'):
         result['podcast_details'] = transcript[:5000] + "..." if len(transcript) > 5000 else transcript
+
+    # Store transcript source metadata
+    result['_transcript_source'] = transcript_source
 
     return result
 
@@ -1523,8 +1695,13 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
 
     # Episode header
     st.markdown(f"## 📻 {episode_title}")
+    caption_parts = []
     if episode_info and episode_info.get('podcast_title'):
-        st.caption(f"From: {episode_info['podcast_title']}")
+        caption_parts.append(f"From: {episode_info['podcast_title']}")
+    if result.get('_transcript_source'):
+        caption_parts.append(f"Transcript: {result['_transcript_source']}")
+    if caption_parts:
+        st.caption(" | ".join(caption_parts))
 
     st.markdown("---")
 

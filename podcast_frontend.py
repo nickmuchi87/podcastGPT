@@ -39,13 +39,15 @@ except (ImportError, OSError):
 # Deep:      Claude Opus 4.6   — deep reasoning, complex multi-speaker episodes
 # Transcription: OpenAI Whisper-1 (best-in-class, no substitute)
 
-SUMMARY_MODEL_FLASH  = "gemini-2.0-flash"   # fast + cheap
-SUMMARY_MODEL_PRO    = "gemini-1.5-pro"     # richer analysis
-DEEP_REASONING_MODEL = "claude-opus-4-6"    # complex/multi-speaker episodes
+SUMMARY_MODEL_FLASH  = "gemini-2.0-flash"   # fast + cheap  (<15k chars)
+SUMMARY_MODEL_SONNET = "claude-sonnet-4-6"  # balanced quality (15k–50k chars)
+SUMMARY_MODEL_PRO    = "gemini-1.5-pro"     # long context   (>50k chars)
+DEEP_REASONING_MODEL = "claude-opus-4-6"    # deep mode: complex/multi-speaker
 TRANSCRIPTION_MODEL  = "whisper-1"          # OpenAI Whisper (audio only)
 
-# Token threshold above which we upgrade Flash → Pro
-PRO_THRESHOLD_CHARS = 30_000
+# Thresholds for model routing
+SONNET_THRESHOLD_CHARS = 15_000   # above this: Flash → Sonnet
+PRO_THRESHOLD_CHARS    = 50_000   # above this: Sonnet → Pro
 
 # ============================================================================
 # Configuration & Constants
@@ -1047,13 +1049,11 @@ def _fallback_result(err: str) -> Dict[str, Any]:
     }
 
 
-def generate_em_summary_gemini(transcript: str, deep: bool = False) -> Dict[str, Any]:
-    """Summarize using Gemini Flash (fast) or Pro (deep) depending on transcript length."""
+def generate_em_summary_gemini(transcript: str, model_name: str = SUMMARY_MODEL_FLASH) -> Dict[str, Any]:
+    """Summarize using a Gemini model (Flash or Pro)."""
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key or not GEMINI_AVAILABLE:
         return None  # Signal caller to try next model
-
-    model_name = SUMMARY_MODEL_PRO if (deep or len(transcript) > PRO_THRESHOLD_CHARS) else SUMMARY_MODEL_FLASH
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
@@ -1067,8 +1067,28 @@ def generate_em_summary_gemini(transcript: str, deep: bool = False) -> Dict[str,
                 "podcast_guest_title": "", "podcast_guest_org": "",
                 "podcast_highlights": "• See summary above", "podcast_details": "",
                 "_model_used": model_name}
-    except Exception as e:
+    except Exception:
         return None  # Signal caller to try next model
+
+
+def generate_em_summary_sonnet(transcript: str) -> Dict[str, Any]:
+    """Balanced quality/cost summarization using Claude Sonnet 4.6 (15k–50k chars)."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or not ANTHROPIC_AVAILABLE:
+        return None
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = _build_summary_prompt(transcript[:100_000])
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = _parse_summary_json(message.content[0].text)
+        result["_model_used"] = "claude-sonnet-4-6"
+        return result
+    except Exception:
+        return None
 
 
 def generate_em_summary_opus(transcript: str) -> Dict[str, Any]:
@@ -1095,16 +1115,20 @@ def generate_em_summary_opus(transcript: str) -> Dict[str, Any]:
 def generate_em_summary(client: OpenAI, transcript: str, deep_mode: bool = False) -> Dict[str, Any]:
     """
     Generate EM Portfolio Manager focused summary.
-    Model routing:
-      - Short transcripts (<30k chars): Gemini Flash
-      - Long transcripts (>30k chars):  Gemini Pro
-      - Deep mode (complex episodes):   Claude Opus 4.6
-      - Fallback:                        GPT-4o (OpenAI)
+
+    Model routing by transcript length:
+      < 15k chars  → Gemini Flash    (fast, cheap)
+      15k–50k      → Claude Sonnet 4.6 (quality/cost sweet spot)
+      > 50k chars  → Gemini Pro      (long context)
+      deep_mode=True → Claude Opus 4.6 (complex/multi-speaker)
+      fallback       → GPT-4o
     """
     max_chars = 150_000
     if len(transcript) > max_chars:
         st.warning(f"Transcript is very long ({len(transcript):,} chars) — analyzing first {max_chars:,} characters.")
         transcript = transcript[:max_chars] + "... [truncated]"
+
+    n = len(transcript)
 
     # Route 1: Deep reasoning → Opus
     if deep_mode:
@@ -1113,14 +1137,25 @@ def generate_em_summary(client: OpenAI, transcript: str, deep_mode: bool = False
         if result:
             return result
 
-    # Route 2: Standard → Gemini Flash/Pro
-    result = generate_em_summary_gemini(transcript, deep=deep_mode)
+    # Route 2: Length-based routing
+    if n < SONNET_THRESHOLD_CHARS:
+        st.caption("Model: Gemini Flash (short transcript)")
+        result = generate_em_summary_gemini(transcript, SUMMARY_MODEL_FLASH)
+    elif n < PRO_THRESHOLD_CHARS:
+        st.caption("Model: Claude Sonnet 4.6")
+        result = generate_em_summary_sonnet(transcript)
+        if result is None:
+            result = generate_em_summary_gemini(transcript, SUMMARY_MODEL_FLASH)  # fallback within tier
+    else:
+        st.caption("Model: Gemini Pro (long transcript)")
+        result = generate_em_summary_gemini(transcript, SUMMARY_MODEL_PRO)
+        if result is None:
+            result = generate_em_summary_sonnet(transcript)  # fallback within tier
+
     if result:
-        model_label = result.get("_model_used", "Gemini")
-        st.caption(f"Model: {model_label}")
         return result
 
-    # Route 3: Fallback → GPT-4o
+    # Route 3: Final fallback → GPT-4o
     st.caption("Model: GPT-4o (fallback)")
     try:
         response = client.chat.completions.create(

@@ -15,11 +15,37 @@ import time
 import tempfile
 from openai import OpenAI, APIError, RateLimitError, APIConnectionError
 try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
 except (ImportError, OSError):
     PYDUB_AVAILABLE = False
     AudioSegment = None
+
+# ============================================================================
+# Model Routing
+# ============================================================================
+# Primary:   Gemini 3.1 Flash  — fast summarization, RSS parsing, quick tasks
+# Secondary: Gemini 3.1 Pro    — longer episodes, richer analysis
+# Deep:      Claude Opus 4.6   — deep reasoning, complex multi-speaker episodes
+# Transcription: OpenAI Whisper-1 (best-in-class, no substitute)
+
+SUMMARY_MODEL_FLASH  = "gemini-2.0-flash"   # fast + cheap
+SUMMARY_MODEL_PRO    = "gemini-1.5-pro"     # richer analysis
+DEEP_REASONING_MODEL = "claude-opus-4-6"    # complex/multi-speaker episodes
+TRANSCRIPTION_MODEL  = "whisper-1"          # OpenAI Whisper (audio only)
+
+# Token threshold above which we upgrade Flash → Pro
+PRO_THRESHOLD_CHARS = 30_000
 
 # ============================================================================
 # Configuration & Constants
@@ -31,16 +57,25 @@ APP_DESCRIPTION = "AI-Powered Podcast Analysis for EM Portfolio Managers"
 
 # Sample podcasts - EM and Macro focused (using reliable RSS feeds)
 SAMPLE_PODCASTS = {
-    # Primary EM-focused podcasts
-    "Odd Lots (Bloomberg)": "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/8a94442e-5a74-4fa2-8b8d-ae27003a8d6b/982f5071-765c-403d-969d-ae27003a8d83/podcast.rss",
-    "EM Podcast (Tellimer)": "https://anchor.fm/s/4ad0dd20/podcast/rss",
-    "Moody's EM Decoded": "https://feeds.megaphone.fm/moodystalksemergingmarketsdecoded",
-    "Clauses & Controversies": "https://feeds.soundcloud.com/users/soundcloud:users:863571279/sounds.rss",
-    "Geopolitics (Frank McKenna)": "https://feeds.simplecast.com/geopolitics_with_frank_mckenna",
-    # Additional macro/finance podcasts
-    "All-In Podcast": "https://feeds.megaphone.fm/all-in-with-chamath-jason-sacks-friedberg",
-    "Macro Voices": "https://feeds.megaphone.fm/macrovoices",
-    "Invest Like the Best": "https://feeds.megaphone.fm/investlikethebest",
+    # ── Nick's core feed (mirrors podcast_monitor.py) ──────────────────────
+    "Odd Lots (Bloomberg)":          "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/8a94442e-5a74-4fa2-8b8d-ae27003a8d6b/982f5071-765c-403d-969d-ae27003a8d83/podcast.rss",
+    "All-In Podcast":                "https://rss.libsyn.com/shows/254861/destinations/1928300.xml",
+    "Clauses & Controversies":       "https://feeds.soundcloud.com/users/soundcloud:users:869013289/sounds.rss",
+    "AQ Americas Quarterly":         "https://rss.buzzsprout.com/2066030.rss",
+    "DebtTalks":                     "https://feed.ausha.co/QdrlaHqD6Q9l",
+    "Geopolitics (Frank McKenna)":   "https://feeds.simplecast.com/DOK9zz6K",
+    "IMF Podcasts":                  "https://imfpodcast.libsyn.com/rss",
+    "Tellimer EM Equities":          "https://emerging-market-equities.buzzsprout.com/1632829.rss",
+    "Conflicts of Interest (ACLED)": "https://rss.buzzsprout.com/2538836.rss",
+    # ── Additional EM / Macro ───────────────────────────────────────────────
+    "Macro Voices":                  "https://feeds.megaphone.fm/macrovoices",
+    "Invest Like the Best":          "https://feeds.megaphone.fm/investlikethebest",
+    "Moody's EM Decoded":            "https://feeds.megaphone.fm/moodystalksemergingmarketsdecoded",
+    # ── Sovereign debt / restructuring ─────────────────────────────────────
+    "Debt Relief & Restructuring (IMF)": "https://imfpodcast.libsyn.com/rss",
+    # ── AI in Finance ──────────────────────────────────────────────────────
+    "Acquired (Tech/Strategy)":      "https://feeds.simplecast.com/t3S1wre0",
+    "The TWIML AI Podcast":          "https://feeds.megaphone.fm/MLN2155636147",
 }
 
 # EM Regions for analysis
@@ -58,7 +93,9 @@ EM_ASSET_CLASSES = [
 
 # Topic categories for structured summaries
 TOPIC_CATEGORIES = {
-    "Market Outlook": ["outlook", "forecast", "expect", "predict", "2024", "2025", "next year", "going forward"],
+    "Market Outlook": ["outlook", "forecast", "expect", "predict",
+                       str(datetime.now().year), str(datetime.now().year + 1),
+                       "next year", "going forward"],
     "Monetary Policy": ["rate", "fed", "central bank", "inflation", "interest", "hiking", "cutting", "pause", "pivot"],
     "Growth & Economy": ["gdp", "growth", "recession", "slowdown", "expansion", "economic", "economy"],
     "Credit & Fixed Income": ["credit", "bond", "spread", "yield", "duration", "default", "high yield", "investment grade"],
@@ -264,7 +301,7 @@ def init_session_state():
         st.session_state.processed_podcasts = {}
 
     if 'history' not in st.session_state:
-        st.session_state.history = []
+        st.session_state.history = _load_history_from_disk()  # restore from disk
 
     if 'current_episodes' not in st.session_state:
         st.session_state.current_episodes = {}
@@ -970,16 +1007,9 @@ def transcribe_audio(client: OpenAI, audio_path: str) -> Optional[str]:
                 pass
 
 
-def generate_em_summary(client: OpenAI, transcript: str) -> Dict[str, Any]:
-    """Generate EM Portfolio Manager focused summary using GPT."""
-
-    # Truncate transcript if too long (GPT-4 context limit)
-    max_chars = 100000
-    if len(transcript) > max_chars:
-        st.warning(f"Transcript is very long ({len(transcript):,} chars) - analyzing first {max_chars:,} characters.")
-        transcript = transcript[:max_chars] + "... [truncated]"
-
-    prompt = f"""You are an expert analyst helping Emerging Markets Portfolio Managers extract actionable insights from podcasts.
+def _build_summary_prompt(transcript: str) -> str:
+    """Shared system prompt for all summarization models."""
+    return f"""You are an expert analyst helping Emerging Markets Portfolio Managers extract actionable insights from podcasts.
 
 Analyze this podcast transcript and provide a structured summary:
 
@@ -996,51 +1026,123 @@ Please provide your analysis in the following JSON format:
     "podcast_details": "Additional context and detailed notes from the discussion"
 }}
 
-Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates, credit, FX, equities), macro themes, risk factors, and investment opportunities discussed."""
+Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates, credit, FX, equities), macro themes, risk factors, VWOB/EMB ETF-relevant sovereign spread dynamics, and investment opportunities discussed.
+Always respond with valid JSON only."""
 
+
+def _parse_summary_json(result_text: str) -> Dict[str, Any]:
+    """Parse JSON from model response, handling markdown code blocks."""
+    if "```json" in result_text:
+        result_text = result_text.split("```json")[1].split("```")[0]
+    elif "```" in result_text:
+        result_text = result_text.split("```")[1].split("```")[0]
+    return json.loads(result_text.strip())
+
+
+def _fallback_result(err: str) -> Dict[str, Any]:
+    return {
+        "podcast_summary": f"Summarization failed: {err[:200]}",
+        "podcast_guest": "N/A", "podcast_guest_title": "", "podcast_guest_org": "",
+        "podcast_highlights": "", "podcast_details": "", "_is_fallback": True
+    }
+
+
+def generate_em_summary_gemini(transcript: str, deep: bool = False) -> Dict[str, Any]:
+    """Summarize using Gemini Flash (fast) or Pro (deep) depending on transcript length."""
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key or not GEMINI_AVAILABLE:
+        return None  # Signal caller to try next model
+
+    model_name = SUMMARY_MODEL_PRO if (deep or len(transcript) > PRO_THRESHOLD_CHARS) else SUMMARY_MODEL_FLASH
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        prompt = _build_summary_prompt(transcript[:120_000])
+        response = model.generate_content(prompt, generation_config={"temperature": 0.3})
+        result = _parse_summary_json(response.text)
+        result["_model_used"] = model_name
+        return result
+    except json.JSONDecodeError:
+        return {"podcast_summary": response.text[:2000], "podcast_guest": "Unknown",
+                "podcast_guest_title": "", "podcast_guest_org": "",
+                "podcast_highlights": "• See summary above", "podcast_details": "",
+                "_model_used": model_name}
+    except Exception as e:
+        return None  # Signal caller to try next model
+
+
+def generate_em_summary_opus(transcript: str) -> Dict[str, Any]:
+    """Deep-reasoning summarization using Claude Opus 4.6 — used for complex/long episodes."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or not ANTHROPIC_AVAILABLE:
+        return None
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = _build_summary_prompt(transcript[:150_000])
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = _parse_summary_json(message.content[0].text)
+        result["_model_used"] = "claude-opus-4-6"
+        return result
+    except Exception as e:
+        return None
+
+
+def generate_em_summary(client: OpenAI, transcript: str, deep_mode: bool = False) -> Dict[str, Any]:
+    """
+    Generate EM Portfolio Manager focused summary.
+    Model routing:
+      - Short transcripts (<30k chars): Gemini Flash
+      - Long transcripts (>30k chars):  Gemini Pro
+      - Deep mode (complex episodes):   Claude Opus 4.6
+      - Fallback:                        GPT-4o (OpenAI)
+    """
+    max_chars = 150_000
+    if len(transcript) > max_chars:
+        st.warning(f"Transcript is very long ({len(transcript):,} chars) — analyzing first {max_chars:,} characters.")
+        transcript = transcript[:max_chars] + "... [truncated]"
+
+    # Route 1: Deep reasoning → Opus
+    if deep_mode:
+        st.info("🧠 Using Claude Opus 4.6 for deep analysis...")
+        result = generate_em_summary_opus(transcript)
+        if result:
+            return result
+
+    # Route 2: Standard → Gemini Flash/Pro
+    result = generate_em_summary_gemini(transcript, deep=deep_mode)
+    if result:
+        model_label = result.get("_model_used", "Gemini")
+        st.caption(f"Model: {model_label}")
+        return result
+
+    # Route 3: Fallback → GPT-4o
+    st.caption("Model: GPT-4o (fallback)")
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a financial analyst specializing in Emerging Markets. Always respond with valid JSON."},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": _build_summary_prompt(transcript)}
             ],
             temperature=0.3,
             max_tokens=4000
         )
-
         result_text = response.choices[0].message.content
-
-        # Try to parse JSON from response
-        # Handle markdown code blocks if present
-        if "```json" in result_text:
-            result_text = result_text.split("```json")[1].split("```")[0]
-        elif "```" in result_text:
-            result_text = result_text.split("```")[1].split("```")[0]
-
-        result = json.loads(result_text.strip())
+        result = _parse_summary_json(result_text)
+        result["_model_used"] = "gpt-4o"
         return result
-
     except json.JSONDecodeError:
-        # If JSON parsing fails, create structured response from text
-        return {
-            "podcast_summary": result_text[:2000] if result_text else "Summary generation failed",
-            "podcast_guest": "Unknown",
-            "podcast_guest_title": "",
-            "podcast_guest_org": "",
-            "podcast_highlights": "• Analysis complete - see summary above",
-            "podcast_details": ""
-        }
+        return {"podcast_summary": result_text[:2000], "podcast_guest": "Unknown",
+                "podcast_guest_title": "", "podcast_guest_org": "",
+                "podcast_highlights": "• Analysis complete - see summary above",
+                "podcast_details": "", "_model_used": "gpt-4o"}
     except Exception as e:
-        return {
-            "podcast_summary": f"GPT summarization failed: {str(e)[:200]}",
-            "podcast_guest": "N/A",
-            "podcast_guest_title": "",
-            "podcast_guest_org": "",
-            "podcast_highlights": "",
-            "podcast_details": "",
-            "_is_fallback": True
-        }
+        return _fallback_result(str(e))
 
 
 def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
@@ -1140,7 +1242,8 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
 
     # Generate EM-focused summary with GPT
     update_progress("🤖 Generating EM Portfolio Manager analysis...", 0.75)
-    result = generate_em_summary(client, transcript)
+    deep_mode = os.environ.get("PODCASTGPT_DEEP_MODE", "0") == "1"
+    result = generate_em_summary(client, transcript, deep_mode=deep_mode)
     update_progress("✅ Analysis complete!", 1.0)
 
     # Add transcript to details if not present
@@ -1290,7 +1393,7 @@ def format_investment_summary(result: Dict[str, Any], em_insights: Dict[str, Any
 
 
 def add_to_history(episode_title: str, podcast_title: str, result: Dict[str, Any]):
-    """Add a processed podcast to history."""
+    """Add a processed podcast to history and persist to disk."""
     history_entry = {
         'episode_title': episode_title,
         'podcast_title': podcast_title,
@@ -1302,6 +1405,83 @@ def add_to_history(episode_title: str, podcast_title: str, result: Dict[str, Any
     st.session_state.history.insert(0, history_entry)
     # Keep only last 20 entries
     st.session_state.history = st.session_state.history[:20]
+    # Persist to disk so history survives restarts
+    _save_history_to_disk(st.session_state.history)
+
+
+# ── Persistence ──────────────────────────────────────────────────────────────
+
+HISTORY_FILE = os.path.join(os.path.dirname(__file__), "content", "podcast_history.json")
+
+
+def _save_history_to_disk(history: list):
+    """Persist session history to local JSON."""
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception:
+        pass  # Non-fatal
+
+
+def _load_history_from_disk() -> list:
+    """Load persisted history on startup."""
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+# ── Telegram Delivery ─────────────────────────────────────────────────────────
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "8691576484")
+
+
+def deliver_to_telegram(episode_title: str, result: Dict[str, Any],
+                         em_insights: Dict[str, Any], podcast_title: str = "") -> bool:
+    """
+    Send a compact podcast summary to Telegram.
+    Only fires if TELEGRAM_BOT_TOKEN is set.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+
+    guest      = result.get("podcast_guest", "Unknown")
+    guest_org  = result.get("podcast_guest_org", "")
+    sentiment  = em_insights.get("sentiment", "—")
+    regions    = ", ".join(em_insights.get("regions", [])[:3])
+    themes     = ", ".join(em_insights.get("themes", [])[:3])
+    highlights = [h.strip().lstrip("•-* ") for h in
+                  result.get("podcast_highlights", "").split("\n") if h.strip()][:4]
+    bullet_pts = "\n".join(f"• {h}" for h in highlights) or "—"
+    model_used = result.get("_model_used", "—")
+
+    msg = (
+        f"🎙️ *PodcastGPT — New Analysis*\n\n"
+        f"*{episode_title}*\n"
+        f"_{podcast_title}_\n\n"
+        f"👤 *Guest:* {guest}{' | ' + guest_org if guest_org else ''}\n"
+        f"📊 *Sentiment:* {sentiment}\n"
+        f"🌍 *Regions:* {regions or '—'}\n"
+        f"🎯 *Themes:* {themes or '—'}\n\n"
+        f"*Key Takeaways:*\n{bullet_pts}\n\n"
+        f"_Model: {model_used}_"
+    )
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "Markdown"
+        }, timeout=10)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def generate_markdown_export(episode_title: str, result: Dict[str, Any]) -> str:
@@ -2094,12 +2274,15 @@ def main():
                     st.toast(f"Analysis complete in {time_str}!")
                     st.session_state.processing_start_time = None
 
-                # Add to history
-                add_to_history(
-                    episode_title,
-                    episode_info.get('podcast_title', 'Unknown Podcast'),
-                    result
-                )
+                # Add to history (also persists to disk)
+                podcast_title_str = episode_info.get('podcast_title', 'Unknown Podcast')
+                add_to_history(episode_title, podcast_title_str, result)
+
+                # Deliver summary to Telegram
+                em_insights_for_tg = extract_em_insights(result)
+                tg_sent = deliver_to_telegram(episode_title, result, em_insights_for_tg, podcast_title_str)
+                if tg_sent:
+                    st.toast("📱 Summary sent to Telegram!")
 
                 st.rerun()
             else:

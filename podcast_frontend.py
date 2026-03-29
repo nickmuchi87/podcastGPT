@@ -39,11 +39,11 @@ except (ImportError, OSError):
 # Deep:      Claude Opus 4.6   — deep reasoning, complex multi-speaker episodes
 # Transcription: OpenAI Whisper-1 (best-in-class, no substitute)
 
-SUMMARY_MODEL_FLASH  = "gemini-2.0-flash"   # fast + cheap  (<15k chars)
-SUMMARY_MODEL_SONNET = "claude-sonnet-4-6"  # balanced quality (15k–50k chars)
-SUMMARY_MODEL_PRO    = "gemini-1.5-pro"     # long context   (>50k chars)
-DEEP_REASONING_MODEL = "claude-opus-4-6"    # deep mode: complex/multi-speaker
-TRANSCRIPTION_MODEL  = "whisper-1"          # OpenAI Whisper (audio only)
+SUMMARY_MODEL_FLASH  = "gemini-2.5-flash-preview-04-17"  # Gemini 3 Flash  (<15k chars)
+SUMMARY_MODEL_SONNET = "claude-sonnet-4-6"              # Sonnet 4.6      (15k–50k chars)
+SUMMARY_MODEL_PRO    = "gemini-2.5-pro-preview-03-25"   # Gemini 3.1 Pro  (>50k chars)
+DEEP_REASONING_MODEL = "claude-opus-4-6"                # Opus 4.6        (deep mode)
+TRANSCRIPTION_MODEL  = "whisper-1"                      # OpenAI Whisper  (audio only)
 
 # Thresholds for model routing
 SONNET_THRESHOLD_CHARS = 15_000   # above this: Flash → Sonnet

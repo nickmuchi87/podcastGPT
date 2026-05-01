@@ -69,6 +69,21 @@ def init_db() -> None:
                 last_episode_processed TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                keyword TEXT,           -- free-text match against title/summary/highlights
+                region TEXT,            -- specific EM region to match
+                theme TEXT,             -- specific theme to match
+                country TEXT,           -- specific country to match
+                sentiment TEXT,         -- match Bullish/Bearish/Neutral if set
+                enabled INTEGER NOT NULL DEFAULT 1,
+                trigger_count INTEGER NOT NULL DEFAULT 0,
+                last_triggered_at TEXT,
+                last_triggered_episode TEXT,
+                created_at TEXT NOT NULL
+            );
         """)
         conn.commit()
 
@@ -365,6 +380,117 @@ def delete_watchlist(watchlist_id: int) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM watchlist WHERE id = ?", (watchlist_id,))
         conn.commit()
+
+
+# ── Alerts CRUD ─────────────────────────────────────────────────────────
+
+def add_alert(
+    name: str,
+    keyword: str = "",
+    region: str = "",
+    theme: str = "",
+    country: str = "",
+    sentiment: str = "",
+    enabled: bool = True,
+) -> int:
+    init_db()
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        cur = conn.execute("""
+            INSERT INTO alerts (name, keyword, region, theme, country, sentiment,
+                                enabled, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, keyword, region, theme, country, sentiment, int(enabled), now))
+        conn.commit()
+        return cur.lastrowid or 0
+
+
+def list_alerts(enabled_only: bool = False) -> List[Dict[str, Any]]:
+    init_db()
+    sql = "SELECT * FROM alerts"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY name"
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(sql).fetchall()]
+
+
+def update_alert(
+    alert_id: int,
+    enabled: Optional[bool] = None,
+    trigger_count: Optional[int] = None,
+    last_triggered_at: Optional[str] = None,
+    last_triggered_episode: Optional[str] = None,
+) -> None:
+    init_db()
+    fields, params = [], []
+    if enabled is not None:
+        fields.append("enabled = ?")
+        params.append(int(enabled))
+    if trigger_count is not None:
+        fields.append("trigger_count = ?")
+        params.append(trigger_count)
+    if last_triggered_at is not None:
+        fields.append("last_triggered_at = ?")
+        params.append(last_triggered_at)
+    if last_triggered_episode is not None:
+        fields.append("last_triggered_episode = ?")
+        params.append(last_triggered_episode)
+    if not fields:
+        return
+    params.append(alert_id)
+    with _connect() as conn:
+        conn.execute(f"UPDATE alerts SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+
+
+def delete_alert(alert_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+        conn.commit()
+
+
+def evaluate_alerts_for_episode(
+    episode_title: str,
+    podcast_title: str,
+    result: Dict[str, Any],
+    em_insights: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Return list of alerts that match this episode. Caller is responsible
+    for sending notifications and bumping trigger counters.
+    """
+    matched: List[Dict[str, Any]] = []
+    summary = (result.get("podcast_summary") or "").lower()
+    highlights = (result.get("podcast_highlights") or "").lower()
+    title_lower = episode_title.lower()
+    full_text = f"{title_lower} {summary} {highlights}"
+
+    regions = [r.lower() for r in em_insights.get("regions", [])]
+    themes = [t.lower() for t in em_insights.get("themes", [])]
+    countries = [c.lower() for c in em_insights.get("countries", [])]
+    sentiment = (em_insights.get("sentiment") or "").lower()
+
+    for alert in list_alerts(enabled_only=True):
+        if alert.get("keyword"):
+            if alert["keyword"].lower() not in full_text:
+                continue
+        if alert.get("region"):
+            if alert["region"].lower() not in regions:
+                continue
+        if alert.get("theme"):
+            if alert["theme"].lower() not in themes:
+                continue
+        if alert.get("country"):
+            if alert["country"].lower() not in countries:
+                continue
+        if alert.get("sentiment"):
+            if alert["sentiment"].lower() != sentiment:
+                continue
+        matched.append(alert)
+
+    return matched
 
 
 def migrate_legacy_history() -> int:

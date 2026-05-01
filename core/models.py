@@ -555,6 +555,110 @@ def chat_with_transcript(
         return (f"{model.name} error: {e}", model)
 
 
+def synthesize_across_episodes(
+    episodes: List[Dict[str, Any]],
+    question: str,
+    priority: str = "quality",
+) -> Tuple[str, Optional[ModelSpec]]:
+    """
+    Cross-episode synthesis. Given a list of episode dicts (with summary,
+    highlights, and full_transcript) and a synthesis question, send to
+    the best long-context model to produce a meta-analysis.
+
+    Returns (text, model_used). On failure returns (error_msg, None).
+    """
+    if not episodes:
+        return "No episodes provided for synthesis.", None
+
+    # Build the corpus block
+    parts = ["Below are analyses of {} podcast episodes:\n".format(len(episodes))]
+    for i, e in enumerate(episodes, start=1):
+        ep_block = [
+            f"\n=== Episode {i}: {e.get('episode_title', 'Untitled')} ===",
+            f"Date: {e.get('created_at', 'unknown')[:10]}",
+            f"Source: {e.get('podcast_title', '?')}",
+            f"Guest: {e.get('guest', 'Unknown')} ({e.get('guest_org', '')})",
+            f"Sentiment: {e.get('sentiment', 'Unknown')}",
+            f"Regions: {', '.join(e.get('regions', [])) or '—'}",
+            f"Themes: {', '.join(e.get('themes', [])) or '—'}",
+            f"Countries: {', '.join(e.get('countries', [])) or '—'}",
+            "",
+            f"Summary: {e.get('summary', '')[:1500]}",
+            "",
+            f"Highlights: {(e.get('highlights') or '')[:800]}",
+        ]
+        # Optionally include excerpt of transcript if available + space allows
+        excerpt = (e.get("full_transcript") or "")[:3000]
+        if excerpt:
+            ep_block.append(f"\nTranscript excerpt: {excerpt}…")
+        parts.append("\n".join(ep_block))
+
+    corpus = "\n".join(parts)
+    prompt = f"""You are a senior EM (Emerging Markets) Portfolio Manager research assistant.
+
+{corpus}
+
+---
+
+QUESTION: {question}
+
+Provide a concise but thorough synthesis (~400-600 words). Structure your answer with:
+
+1. **Consensus** — what most guests agree on, with episode references like (Ep 2, Ep 5)
+2. **Contrarian / dissenting views** — where guests disagree, with references
+3. **How views have evolved** over time (use dates)
+4. **Implications for EM portfolio positioning** — actionable takeaways
+5. **Open questions / blind spots** — what nobody addressed
+
+Use markdown formatting. Cite specific episodes when making claims.
+"""
+
+    # Estimate corpus length to pick the right model
+    chars = len(prompt)
+    model = select_model(
+        task="long_context" if chars > 100_000 else "deep_summary",
+        transcript_chars=chars,
+        priority=priority,
+    )
+    if model is None:
+        return "No suitable model available — check API keys.", None
+
+    try:
+        if model.provider == "gemini":
+            api_key = _provider_key("gemini")
+            genai.configure(api_key=api_key)
+            m = genai.GenerativeModel(model.model_id)
+            resp = m.generate_content(prompt, generation_config={"temperature": 0.3})
+            return (resp.text, model)
+
+        if model.provider == "anthropic":
+            api_key = _provider_key("anthropic")
+            client = anthropic.Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model=model.model_id,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return (resp.content[0].text if resp.content else "(empty)", model)
+
+        # OpenAI / DeepSeek
+        api_key = _provider_key(model.provider)
+        kwargs = {"api_key": api_key}
+        if model.provider == "deepseek":
+            kwargs["base_url"] = "https://api.deepseek.com"
+        client = OpenAIClient(**kwargs)
+        resp = client.chat.completions.create(
+            model=model.model_id,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2048,
+            temperature=0.3,
+        )
+        return (resp.choices[0].message.content or "(empty)", model)
+
+    except Exception as e:
+        return (f"{model.name} error: {e}", model)
+
+
 def list_available_models(priority: str = "balanced") -> List[Dict[str, Any]]:
     """Return models sorted by score (for UI display)."""
     avail = available_providers()

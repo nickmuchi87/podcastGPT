@@ -192,7 +192,30 @@ def process_feed(
         except Exception:
             pass  # Non-fatal
 
-    # 5. Update watchlist watermark
+    # 5. Evaluate alerts and fire notifications for matches
+    alert_msg = ""
+    try:
+        matched = db.evaluate_alerts_for_episode(
+            episode_title=episode_title,
+            podcast_title=podcast_title,
+            result=result,
+            em_insights=em_insights,
+        )
+        for a in matched:
+            send_alert_notification(a, episode_title, podcast_title, result, em_insights)
+            db.update_alert(
+                a["id"],
+                trigger_count=a["trigger_count"] + 1,
+                last_triggered_at=datetime.now().isoformat(),
+                last_triggered_episode=episode_title,
+            )
+        if matched:
+            alert_msg = f" · 🔔 {len(matched)} alert(s) triggered"
+    except Exception as e:
+        if verbose:
+            print(f"  → Alert evaluation failed: {e}")
+
+    # 6. Update watchlist watermark
     db.update_watchlist(
         feed["id"],
         last_checked_at=datetime.now().isoformat(),
@@ -202,8 +225,55 @@ def process_feed(
     return True, (
         f"{name}: ✓ '{episode_title[:60]}' — "
         f"{result.get('_model_label', '?')} "
-        f"(~${result.get('_estimated_cost', 0):.3f})"
+        f"(~${result.get('_estimated_cost', 0):.3f}){alert_msg}"
     )
+
+
+def send_alert_notification(
+    alert: Dict[str, Any],
+    episode_title: str,
+    podcast_title: str,
+    result: Dict[str, Any],
+    em_insights: Dict[str, Any],
+) -> None:
+    """Push a Telegram alert when a saved search matches a new episode."""
+    import os
+    import requests as req
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return
+
+    criteria = []
+    if alert.get("keyword"):
+        criteria.append(f'keyword: "{alert["keyword"]}"')
+    if alert.get("region"):
+        criteria.append(f'region: {alert["region"]}')
+    if alert.get("country"):
+        criteria.append(f'country: {alert["country"]}')
+    if alert.get("theme"):
+        criteria.append(f'theme: {alert["theme"]}')
+    if alert.get("sentiment"):
+        criteria.append(f'sentiment: {alert["sentiment"]}')
+
+    summary = (result.get("podcast_summary") or "")[:300]
+    msg = (
+        f"🔔 *Alert: {alert['name']}*\n\n"
+        f"*{episode_title}*\n"
+        f"_{podcast_title}_\n\n"
+        f"*Matched on:* {' · '.join(criteria)}\n\n"
+        f"*Sentiment:* {em_insights.get('sentiment', '—')}\n"
+        f"*Regions:* {', '.join(em_insights.get('regions', [])[:3]) or '—'}\n\n"
+        f"{summary}…"
+    )
+    try:
+        req.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def main():

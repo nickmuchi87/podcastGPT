@@ -57,6 +57,18 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_episodes_sentiment ON episodes(sentiment);
             CREATE INDEX IF NOT EXISTS idx_episodes_podcast ON episodes(podcast_title);
+
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                rss_url TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                telegram_notify INTEGER NOT NULL DEFAULT 1,
+                routing_priority TEXT DEFAULT 'balanced',
+                last_checked_at TEXT,
+                last_episode_processed TEXT,
+                created_at TEXT NOT NULL
+            );
         """)
         conn.commit()
 
@@ -276,6 +288,83 @@ def get_total_estimated_cost() -> float:
         except (json.JSONDecodeError, TypeError):
             continue
     return total
+
+
+# ── Watchlist CRUD ──────────────────────────────────────────────────────
+
+def add_watchlist(
+    name: str,
+    rss_url: str,
+    enabled: bool = True,
+    telegram_notify: bool = True,
+    routing_priority: str = "balanced",
+) -> int:
+    init_db()
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        try:
+            cur = conn.execute("""
+                INSERT INTO watchlist (name, rss_url, enabled, telegram_notify,
+                                       routing_priority, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (name, rss_url, int(enabled), int(telegram_notify),
+                  routing_priority, now))
+            conn.commit()
+            return cur.lastrowid or 0
+        except sqlite3.IntegrityError:
+            # URL already exists
+            return -1
+
+
+def list_watchlist(enabled_only: bool = False) -> List[Dict[str, Any]]:
+    init_db()
+    sql = "SELECT * FROM watchlist"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY name"
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_watchlist(
+    watchlist_id: int,
+    enabled: Optional[bool] = None,
+    telegram_notify: Optional[bool] = None,
+    routing_priority: Optional[str] = None,
+    last_checked_at: Optional[str] = None,
+    last_episode_processed: Optional[str] = None,
+) -> None:
+    init_db()
+    fields, params = [], []
+    if enabled is not None:
+        fields.append("enabled = ?")
+        params.append(int(enabled))
+    if telegram_notify is not None:
+        fields.append("telegram_notify = ?")
+        params.append(int(telegram_notify))
+    if routing_priority is not None:
+        fields.append("routing_priority = ?")
+        params.append(routing_priority)
+    if last_checked_at is not None:
+        fields.append("last_checked_at = ?")
+        params.append(last_checked_at)
+    if last_episode_processed is not None:
+        fields.append("last_episode_processed = ?")
+        params.append(last_episode_processed)
+    if not fields:
+        return
+    params.append(watchlist_id)
+    with _connect() as conn:
+        conn.execute(f"UPDATE watchlist SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+
+
+def delete_watchlist(watchlist_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM watchlist WHERE id = ?", (watchlist_id,))
+        conn.commit()
 
 
 def migrate_legacy_history() -> int:

@@ -182,13 +182,15 @@ def _provider_key(provider: str) -> Optional[str]:
         v = os.environ.get(env_name)
         if v:
             return v
-    # Try Streamlit session state (lazy import to keep module pure)
+    # Try Streamlit session state (only when actually running under Streamlit)
     try:
-        import streamlit as st
-        for env_name in keys.get(provider, ()):
-            v = st.session_state.get(env_name.lower())
-            if v:
-                return v
+        from streamlit.runtime import exists
+        if exists():
+            import streamlit as st
+            for env_name in keys.get(provider, ()):
+                v = st.session_state.get(env_name.lower())
+                if v:
+                    return v
     except Exception:
         pass
     return None

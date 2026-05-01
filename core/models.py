@@ -58,14 +58,24 @@ class ModelSpec:
 
 
 MODELS: List[ModelSpec] = [
-    # ── Gemini (huge context, very cheap Flash) ─────────────────────────
+    # ── Gemini (huge context, Flash-Lite is the cheapest option) ────────
+    ModelSpec(
+        name="Gemini 2.5 Flash-Lite",
+        provider="gemini",
+        model_id="gemini-2.5-flash-lite",
+        cost_in=0.10, cost_out=0.40,
+        context_window=1_000_000,
+        tier=3, quality_score=65,
+        tasks=("summary", "qa", "classification", "long_context", "batch"),
+        speed=5,
+    ),
     ModelSpec(
         name="Gemini 2.5 Flash",
         provider="gemini",
         model_id="gemini-2.5-flash-preview-04-17",
-        cost_in=0.075, cost_out=0.30,
+        cost_in=0.30, cost_out=2.50,
         context_window=1_000_000,
-        tier=2, quality_score=72,
+        tier=2, quality_score=78,
         tasks=("summary", "qa", "classification", "long_context"),
         speed=5,
     ),

@@ -1,108 +1,54 @@
 """
 Q&A — chat with the full transcript of an analyzed episode.
 
-Pick an episode from the library and ask questions; answers are
-grounded in the stored transcript using the configured LLM.
+Uses the smart model router to pick the best LLM for Q&A based on
+transcript length and user-selected priority (cost/quality/balanced).
 """
 
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import streamlit as st
 
 from core import database as db
+from core import models as model_router
 
 st.set_page_config(page_title="Q&A — PodcastGPT", page_icon="💬", layout="wide")
 
 
-# ── LLM clients (lazy) ──────────────────────────────────────────────────
-def _ask_with_anthropic(transcript: str, question: str, history: List[Dict[str, str]]) -> str:
-    try:
-        import anthropic
-    except ImportError:
-        return "Anthropic SDK not installed. Add `anthropic` to requirements.txt."
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or st.session_state.get("anthropic_api_key")
-    if not api_key:
-        return "ANTHROPIC_API_KEY not set."
-
-    client = anthropic.Anthropic(api_key=api_key)
-    system = (
-        "You are an EM (Emerging Markets) Portfolio Manager research assistant. "
-        "Answer questions strictly using the provided podcast transcript. "
-        "If the transcript doesn't cover a question, say so. Be concise but specific. "
-        "Quote short passages from the transcript when relevant."
-    )
-    messages = [
-        {"role": "user", "content": f"<transcript>\n{transcript[:120000]}\n</transcript>"},
-        {"role": "assistant", "content": "Got it — ask away and I'll answer based on this transcript."},
-    ]
-    for turn in history[-6:]:  # keep recent history
-        messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append({"role": "user", "content": question})
-
-    try:
-        resp = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=1024,
-            system=system,
-            messages=messages,
-        )
-        return resp.content[0].text if resp.content else "(empty response)"
-    except Exception as e:
-        return f"Anthropic error: {e}"
-
-
-def _ask_with_openai(transcript: str, question: str, history: List[Dict[str, str]]) -> str:
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return "OpenAI SDK not installed."
-
-    api_key = os.environ.get("OPENAI_API_KEY") or st.session_state.get("openai_api_key")
-    if not api_key:
-        return "OPENAI_API_KEY not set."
-
-    client = OpenAI(api_key=api_key)
-    system = (
-        "You are an EM Portfolio Manager research assistant. "
-        "Answer strictly from the provided transcript. If unclear, say so."
-    )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": f"Podcast transcript:\n\n{transcript[:60000]}"},
-    ]
-    for turn in history[-6:]:
-        messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append({"role": "user", "content": question})
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=800,
-            temperature=0.2,
-        )
-        return resp.choices[0].message.content or "(empty response)"
-    except Exception as e:
-        return f"OpenAI error: {e}"
-
-
-def ask(transcript: str, question: str, history: List[Dict[str, str]]) -> str:
-    """Route to the first available LLM."""
-    if os.environ.get("ANTHROPIC_API_KEY") or st.session_state.get("anthropic_api_key"):
-        return _ask_with_anthropic(transcript, question, history)
-    return _ask_with_openai(transcript, question, history)
-
-
 # ── UI ──────────────────────────────────────────────────────────────────
 st.title("💬 Ask the Podcast")
-st.caption("Pick an analyzed episode and ask questions grounded in its full transcript.")
+st.caption(
+    "Pick an analyzed episode and ask questions grounded in its full transcript. "
+    "Routing balances cost and quality automatically."
+)
+
+# Show available providers / current routing priority
+avail = model_router.available_providers()
+if not avail:
+    st.error(
+        "No AI provider keys configured. Add at least one of "
+        "`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `DEEPSEEK_API_KEY`."
+    )
+    st.stop()
+
+priority_options = ["balanced", "quality", "cost", "speed"]
+current = st.session_state.get("routing_priority", "balanced")
+prio_col, info_col = st.columns([2, 3])
+with prio_col:
+    st.session_state["routing_priority"] = st.radio(
+        "Routing priority",
+        priority_options,
+        index=priority_options.index(current),
+        horizontal=True,
+        key="qa_priority",
+    )
+with info_col:
+    st.caption(f"Active providers: **{', '.join(sorted(avail))}**")
 
 episodes = db.list_episodes(limit=200)
 episodes_with_transcripts = [e for e in episodes if e.get("full_transcript")]
@@ -120,19 +66,34 @@ ep_options = {
 }
 selected_label = st.selectbox("Choose an episode", list(ep_options.keys()))
 episode = ep_options[selected_label]
+transcript = episode.get("full_transcript", "")
+
+# Show what model will be picked
+chosen = model_router.select_model(
+    task="qa",
+    transcript_chars=len(transcript),
+    priority=st.session_state["routing_priority"],
+)
 
 # Episode meta
-meta_col1, meta_col2 = st.columns([3, 1])
-with meta_col1:
-    st.markdown(f"**Guest:** {episode.get('guest','Unknown')} · "
-                f"**Sentiment:** {episode.get('sentiment','—')} · "
-                f"**Transcript:** {len(episode.get('full_transcript','')):,} chars")
-with meta_col2:
-    if st.button("🔄 New conversation", use_container_width=True):
+m1, m2, m3 = st.columns([3, 2, 1])
+with m1:
+    st.markdown(
+        f"**Guest:** {episode.get('guest','Unknown')} · "
+        f"**Sentiment:** {episode.get('sentiment','—')}"
+    )
+with m2:
+    if chosen:
+        cost = model_router.estimate_cost(chosen, len(transcript), output_tokens=600)
+        st.caption(f"🤖 Will use: **{chosen.name}** (~${cost:.3f}/question)")
+with m3:
+    if st.button("🔄 New chat", use_container_width=True):
         st.session_state[f"qa_history_{episode['id']}"] = []
         st.rerun()
 
-# Suggested questions
+st.caption(f"Transcript length: {len(transcript):,} chars")
+
+# Suggested starter questions
 st.markdown("**Suggested:**")
 suggestions = [
     "What's the guest's main view on EM rates?",
@@ -141,7 +102,7 @@ suggestions = [
     "Did the guest disagree with consensus on anything?",
 ]
 sug_cols = st.columns(len(suggestions))
-suggested_q: Optional[str] = None
+suggested_q = None
 for i, s in enumerate(suggestions):
     with sug_cols[i]:
         if st.button(s, key=f"sug_{i}", use_container_width=True):
@@ -149,15 +110,16 @@ for i, s in enumerate(suggestions):
 
 st.markdown("---")
 
-# Chat history
+# Chat history (per episode)
 hist_key = f"qa_history_{episode['id']}"
 if hist_key not in st.session_state:
     st.session_state[hist_key] = []
 
-# Render past turns
 for turn in st.session_state[hist_key]:
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
+        if turn["role"] == "assistant" and turn.get("model"):
+            st.caption(f"_via {turn['model']}_")
 
 # Input
 user_q = st.chat_input("Ask anything about this episode…")
@@ -170,10 +132,18 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
-            answer = ask(
-                transcript=episode.get("full_transcript", ""),
+            answer, model_used = model_router.chat_with_transcript(
+                transcript=transcript,
                 question=question,
-                history=st.session_state[hist_key][:-1],  # exclude the just-added user msg
+                history=st.session_state[hist_key][:-1],  # exclude just-added user msg
+                priority=st.session_state["routing_priority"],
             )
         st.markdown(answer)
-    st.session_state[hist_key].append({"role": "assistant", "content": answer})
+        if model_used:
+            st.caption(f"_via {model_used.name}_")
+
+    st.session_state[hist_key].append({
+        "role": "assistant",
+        "content": answer,
+        "model": model_used.name if model_used else None,
+    })

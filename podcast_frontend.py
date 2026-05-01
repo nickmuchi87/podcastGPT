@@ -50,24 +50,19 @@ from core.exports import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
+from core import models as model_router
 
 # ============================================================================
 # Model Routing
 # ============================================================================
-# Primary:   Gemini 3.1 Flash  — fast summarization, RSS parsing, quick tasks
-# Secondary: Gemini 3.1 Pro    — longer episodes, richer analysis
-# Deep:      Claude Opus 4.6   — deep reasoning, complex multi-speaker episodes
-# Transcription: OpenAI Whisper-1 (best-in-class, no substitute)
+# Smart routing across all 4 providers (Anthropic / OpenAI / Gemini / DeepSeek)
+# is implemented in core/models.py. Picks the best model per call based on
+# transcript length, task type, and user-selected priority
+# (cost / balanced / quality / speed).
+#
+# Whisper-1 (OpenAI) is still the only transcription model we use.
 
-SUMMARY_MODEL_FLASH  = "gemini-2.5-flash-preview-04-17"  # Gemini 3 Flash  (<15k chars)
-SUMMARY_MODEL_SONNET = "claude-sonnet-4-6"              # Sonnet 4.6      (15k–50k chars)
-SUMMARY_MODEL_PRO    = "gemini-2.5-pro-preview-03-25"   # Gemini 3.1 Pro  (>50k chars)
-DEEP_REASONING_MODEL = "claude-opus-4-6"                # Opus 4.6        (deep mode)
-TRANSCRIPTION_MODEL  = "whisper-1"                      # OpenAI Whisper  (audio only)
-
-# Thresholds for model routing
-SONNET_THRESHOLD_CHARS = 15_000   # above this: Flash → Sonnet
-PRO_THRESHOLD_CHARS    = 50_000   # above this: Sonnet → Pro
+TRANSCRIPTION_MODEL = "whisper-1"
 
 # ============================================================================
 # Configuration & Constants
@@ -954,175 +949,43 @@ def transcribe_audio(client: OpenAI, audio_path: str) -> Optional[str]:
                 pass
 
 
-def _build_summary_prompt(transcript: str) -> str:
-    """Shared system prompt for all summarization models."""
-    return f"""You are an expert analyst helping Emerging Markets Portfolio Managers extract actionable insights from podcasts.
-
-Analyze this podcast transcript and provide a structured summary:
-
-TRANSCRIPT:
-{transcript}
-
-Please provide your analysis in the following JSON format:
-{{
-    "podcast_summary": "A 3-4 paragraph executive summary focusing on key investment themes, market views, and actionable insights relevant to EM investors",
-    "podcast_guest": "Name of the main guest/speaker (or 'Multiple Speakers' if unclear)",
-    "podcast_guest_title": "Their title/role",
-    "podcast_guest_org": "Their organization",
-    "podcast_highlights": "5-7 bullet points (each starting with •) of the most important takeaways for portfolio managers",
-    "podcast_details": "Additional context and detailed notes from the discussion"
-}}
-
-Focus on: regional views (LatAm, EMEA, Asia, China), asset class opinions (rates, credit, FX, equities), macro themes, risk factors, VWOB/EMB ETF-relevant sovereign spread dynamics, and investment opportunities discussed.
-Always respond with valid JSON only."""
-
-
-def _parse_summary_json(result_text: str) -> Dict[str, Any]:
-    """Parse JSON from model response, handling markdown code blocks."""
-    if "```json" in result_text:
-        result_text = result_text.split("```json")[1].split("```")[0]
-    elif "```" in result_text:
-        result_text = result_text.split("```")[1].split("```")[0]
-    return json.loads(result_text.strip())
-
-
-def _fallback_result(err: str) -> Dict[str, Any]:
-    return {
-        "podcast_summary": f"Summarization failed: {err[:200]}",
-        "podcast_guest": "N/A", "podcast_guest_title": "", "podcast_guest_org": "",
-        "podcast_highlights": "", "podcast_details": "", "_is_fallback": True
-    }
-
-
-def generate_em_summary_gemini(transcript: str, model_name: str = SUMMARY_MODEL_FLASH) -> Dict[str, Any]:
-    """Summarize using a Gemini model (Flash or Pro)."""
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key or not GEMINI_AVAILABLE:
-        return None  # Signal caller to try next model
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        prompt = _build_summary_prompt(transcript[:120_000])
-        response = model.generate_content(prompt, generation_config={"temperature": 0.3})
-        result = _parse_summary_json(response.text)
-        result["_model_used"] = model_name
-        return result
-    except json.JSONDecodeError:
-        return {"podcast_summary": response.text[:2000], "podcast_guest": "Unknown",
-                "podcast_guest_title": "", "podcast_guest_org": "",
-                "podcast_highlights": "• See summary above", "podcast_details": "",
-                "_model_used": model_name}
-    except Exception:
-        return None  # Signal caller to try next model
-
-
-def generate_em_summary_sonnet(transcript: str) -> Dict[str, Any]:
-    """Balanced quality/cost summarization using Claude Sonnet 4.6 (15k–50k chars)."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key or not ANTHROPIC_AVAILABLE:
-        return None
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        prompt = _build_summary_prompt(transcript[:100_000])
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        result = _parse_summary_json(message.content[0].text)
-        result["_model_used"] = "claude-sonnet-4-6"
-        return result
-    except Exception:
-        return None
-
-
-def generate_em_summary_opus(transcript: str) -> Dict[str, Any]:
-    """Deep-reasoning summarization using Claude Opus 4.6 — used for complex/long episodes."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key or not ANTHROPIC_AVAILABLE:
-        return None
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        prompt = _build_summary_prompt(transcript[:150_000])
-        message = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        result = _parse_summary_json(message.content[0].text)
-        result["_model_used"] = "claude-opus-4-6"
-        return result
-    except Exception as e:
-        return None
+# Per-provider summary functions and prompt helpers were moved to core/models.py
+# in the smart-router migration. The router handles all provider invocations,
+# fallbacks, and JSON parsing now.
 
 
 def generate_em_summary(client: OpenAI, transcript: str, deep_mode: bool = False) -> Dict[str, Any]:
     """
-    Generate EM Portfolio Manager focused summary.
+    Generate EM Portfolio Manager focused summary using the smart router.
 
-    Model routing by transcript length:
-      < 15k chars  → Gemini Flash    (fast, cheap)
-      15k–50k      → Claude Sonnet 4.6 (quality/cost sweet spot)
-      > 50k chars  → Gemini Pro      (long context)
-      deep_mode=True → Claude Opus 4.6 (complex/multi-speaker)
-      fallback       → GPT-4o
+    Routing balances cost, quality, and task fit across all available
+    providers (Anthropic, OpenAI, Gemini, DeepSeek). User can override
+    via st.session_state["routing_priority"].
+
+    deep_mode forces task="deep_summary" (favors top-tier reasoning models).
     """
-    max_chars = 150_000
-    if len(transcript) > max_chars:
-        st.warning(f"Transcript is very long ({len(transcript):,} chars) — analyzing first {max_chars:,} characters.")
-        transcript = transcript[:max_chars] + "... [truncated]"
+    # User preference: "balanced" | "cost" | "quality" | "speed"
+    priority = st.session_state.get("routing_priority", "balanced")
+    task = "deep_summary" if deep_mode else "summary"
 
-    n = len(transcript)
-
-    # Route 1: Deep reasoning → Opus
-    if deep_mode:
-        st.info("🧠 Using Claude Opus 4.6 for deep analysis...")
-        result = generate_em_summary_opus(transcript)
-        if result:
-            return result
-
-    # Route 2: Length-based routing
-    if n < SONNET_THRESHOLD_CHARS:
-        st.caption("Model: Gemini Flash (short transcript)")
-        result = generate_em_summary_gemini(transcript, SUMMARY_MODEL_FLASH)
-    elif n < PRO_THRESHOLD_CHARS:
-        st.caption("Model: Claude Sonnet 4.6")
-        result = generate_em_summary_sonnet(transcript)
-        if result is None:
-            result = generate_em_summary_gemini(transcript, SUMMARY_MODEL_FLASH)  # fallback within tier
-    else:
-        st.caption("Model: Gemini Pro (long transcript)")
-        result = generate_em_summary_gemini(transcript, SUMMARY_MODEL_PRO)
-        if result is None:
-            result = generate_em_summary_sonnet(transcript)  # fallback within tier
-
-    if result:
-        return result
-
-    # Route 3: Final fallback → GPT-4o
-    st.caption("Model: GPT-4o (fallback)")
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a financial analyst specializing in Emerging Markets. Always respond with valid JSON."},
-                {"role": "user", "content": _build_summary_prompt(transcript)}
-            ],
-            temperature=0.3,
-            max_tokens=4000
+    # Show routing decision before invocation
+    chosen = model_router.select_model(
+        task=task,
+        transcript_chars=len(transcript),
+        priority=priority,
+    )
+    if chosen:
+        cost_est = model_router.estimate_cost(chosen, len(transcript))
+        st.caption(
+            f"🤖 Routed to **{chosen.name}** "
+            f"({chosen.provider}, {priority}) · ~${cost_est:.3f}"
         )
-        result_text = response.choices[0].message.content
-        result = _parse_summary_json(result_text)
-        result["_model_used"] = "gpt-4o"
-        return result
-    except json.JSONDecodeError:
-        return {"podcast_summary": result_text[:2000], "podcast_guest": "Unknown",
-                "podcast_guest_title": "", "podcast_guest_org": "",
-                "podcast_highlights": "• Analysis complete - see summary above",
-                "podcast_details": "", "_model_used": "gpt-4o"}
-    except Exception as e:
-        return _fallback_result(str(e))
+
+    return model_router.generate_summary(
+        transcript=transcript,
+        task=task,
+        priority=priority,
+    )
 
 
 def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
@@ -1339,24 +1202,79 @@ def _load_demo_json(filepath: str) -> Dict[str, Any]:
 def render_sidebar():
     """Render the sidebar with podcast input options."""
     with st.sidebar:
-        # API Key configuration
-        if 'openai_api_key' not in st.session_state:
-            st.session_state.openai_api_key = os.environ.get('OPENAI_API_KEY', '')
+        # ── API Keys (all 4 providers) ─────────────────────────────────────
+        for key_name, label in [
+            ("openai_api_key", "OpenAI API Key"),
+            ("anthropic_api_key", "Anthropic API Key"),
+            ("gemini_api_key", "Gemini API Key"),
+            ("deepseek_api_key", "DeepSeek API Key"),
+        ]:
+            if key_name not in st.session_state:
+                env_var = key_name.upper()
+                # GEMINI also accepts GOOGLE_API_KEY
+                fallback_env = "GOOGLE_API_KEY" if "gemini" in key_name else None
+                st.session_state[key_name] = (
+                    os.environ.get(env_var, "")
+                    or (os.environ.get(fallback_env, "") if fallback_env else "")
+                )
 
-        with st.expander("⚙️ API Configuration", expanded=not st.session_state.openai_api_key):
-            api_key = st.text_input(
-                "OpenAI API Key",
-                value=st.session_state.openai_api_key,
-                type="password",
-                help="Required for live podcast processing. Get your key at platform.openai.com"
-            )
-            if api_key != st.session_state.openai_api_key:
-                st.session_state.openai_api_key = api_key
+        any_key = any(
+            st.session_state.get(k, "")
+            for k in ("openai_api_key", "anthropic_api_key",
+                      "gemini_api_key", "deepseek_api_key")
+        )
 
-            if st.session_state.openai_api_key:
-                st.success("API key configured")
+        with st.expander("⚙️ AI Provider Keys", expanded=not any_key):
+            for key_name, label in [
+                ("anthropic_api_key", "Anthropic (Claude)"),
+                ("openai_api_key", "OpenAI (GPT)"),
+                ("gemini_api_key", "Google (Gemini)"),
+                ("deepseek_api_key", "DeepSeek"),
+            ]:
+                v = st.text_input(
+                    label,
+                    value=st.session_state.get(key_name, ""),
+                    type="password",
+                    key=f"input_{key_name}",
+                )
+                if v != st.session_state.get(key_name, ""):
+                    st.session_state[key_name] = v
+
+            # Show available providers based on configured keys
+            avail = model_router.available_providers()
+            if avail:
+                st.success(f"Active: {', '.join(sorted(avail))}")
             else:
-                st.warning("Enter API key for live processing, or use Demo Mode")
+                st.warning("Add at least one provider key, or use Demo Mode.")
+
+        # ── Smart Routing Preference ───────────────────────────────────────
+        with st.expander("🎯 Model Routing", expanded=False):
+            st.session_state["routing_priority"] = st.radio(
+                "Optimize for:",
+                ["balanced", "quality", "cost", "speed"],
+                index=["balanced", "quality", "cost", "speed"].index(
+                    st.session_state.get("routing_priority", "balanced")
+                ),
+                horizontal=True,
+                help=(
+                    "**Balanced**: Best quality at reasonable cost\n\n"
+                    "**Quality**: Use top-tier models regardless of cost\n\n"
+                    "**Cost**: Cheapest viable model\n\n"
+                    "**Speed**: Fastest model"
+                ),
+            )
+
+            # Show what would be picked for typical transcript size
+            preview_chars = 30_000
+            chosen = model_router.select_model(
+                "summary", preview_chars,
+                priority=st.session_state["routing_priority"],
+            )
+            if chosen:
+                cost = model_router.estimate_cost(chosen, preview_chars)
+                st.caption(
+                    f"For a 30k-char transcript → **{chosen.name}** (~${cost:.3f})"
+                )
 
         st.markdown("---")
         st.markdown("### 🎧 Select Podcast")

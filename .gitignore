@@ -1,1 +1,4 @@
 __pycache__/
+content/podcastgpt.db
+content/podcastgpt.db-journal
+content/podcast_history.json

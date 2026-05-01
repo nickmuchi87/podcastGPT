@@ -1,0 +1,258 @@
+"""
+SQLite-backed persistence for PodcastGPT.
+
+Stores full episode analyses including transcripts, summaries, and
+extracted insights. Replaces the brittle JSON-file approach with a
+queryable database that supports search, filter, and trend analysis.
+"""
+
+import json
+import os
+import sqlite3
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "content", "podcastgpt.db")
+LEGACY_HISTORY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    "content", "podcast_history.json")
+
+
+def _connect() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    """Create tables if they don't exist."""
+    with _connect() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                episode_title TEXT NOT NULL,
+                podcast_title TEXT NOT NULL,
+                guest TEXT,
+                guest_title TEXT,
+                guest_org TEXT,
+                summary TEXT,
+                highlights TEXT,
+                details TEXT,
+                full_transcript TEXT,
+                transcript_source TEXT,
+                model_used TEXT,
+                sentiment TEXT,
+                regions TEXT,         -- JSON array
+                themes TEXT,          -- JSON array
+                countries TEXT,       -- JSON array
+                asset_classes TEXT,   -- JSON array
+                bullish_score INTEGER DEFAULT 0,
+                bearish_score INTEGER DEFAULT 0,
+                full_result TEXT,     -- JSON of full result dict
+                created_at TEXT NOT NULL,
+                UNIQUE(episode_title, podcast_title)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_episodes_sentiment ON episodes(sentiment);
+            CREATE INDEX IF NOT EXISTS idx_episodes_podcast ON episodes(podcast_title);
+        """)
+        conn.commit()
+
+
+def save_episode(
+    episode_title: str,
+    podcast_title: str,
+    result: Dict[str, Any],
+    em_insights: Optional[Dict[str, Any]] = None,
+    full_transcript: Optional[str] = None,
+) -> int:
+    """Persist an analyzed episode. Returns the row id (overwrites if dup)."""
+    init_db()
+    em = em_insights or {}
+    now = datetime.now().isoformat()
+
+    with _connect() as conn:
+        cur = conn.execute("""
+            INSERT INTO episodes (
+                episode_title, podcast_title, guest, guest_title, guest_org,
+                summary, highlights, details, full_transcript, transcript_source,
+                model_used, sentiment, regions, themes, countries, asset_classes,
+                bullish_score, bearish_score, full_result, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(episode_title, podcast_title) DO UPDATE SET
+                guest=excluded.guest,
+                guest_title=excluded.guest_title,
+                guest_org=excluded.guest_org,
+                summary=excluded.summary,
+                highlights=excluded.highlights,
+                details=excluded.details,
+                full_transcript=excluded.full_transcript,
+                transcript_source=excluded.transcript_source,
+                model_used=excluded.model_used,
+                sentiment=excluded.sentiment,
+                regions=excluded.regions,
+                themes=excluded.themes,
+                countries=excluded.countries,
+                asset_classes=excluded.asset_classes,
+                bullish_score=excluded.bullish_score,
+                bearish_score=excluded.bearish_score,
+                full_result=excluded.full_result,
+                created_at=excluded.created_at
+        """, (
+            episode_title,
+            podcast_title,
+            result.get("podcast_guest", "Unknown"),
+            result.get("podcast_guest_title", ""),
+            result.get("podcast_guest_org", ""),
+            result.get("podcast_summary", ""),
+            result.get("podcast_highlights", ""),
+            result.get("podcast_details", ""),
+            full_transcript or result.get("_full_transcript", ""),
+            result.get("_transcript_source", ""),
+            result.get("_model_used", ""),
+            em.get("sentiment", ""),
+            json.dumps(em.get("regions", [])),
+            json.dumps(em.get("themes", [])),
+            json.dumps(em.get("countries", [])),
+            json.dumps(em.get("asset_classes", [])),
+            em.get("bullish_score", 0),
+            em.get("bearish_score", 0),
+            json.dumps(result),
+            now,
+        ))
+        conn.commit()
+        return cur.lastrowid or 0
+
+
+def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    d = dict(row)
+    for key in ("regions", "themes", "countries", "asset_classes"):
+        try:
+            d[key] = json.loads(d.get(key) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            d[key] = []
+    try:
+        d["full_result"] = json.loads(d.get("full_result") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        d["full_result"] = {}
+    return d
+
+
+def list_episodes(
+    search: str = "",
+    sentiment: Optional[str] = None,
+    podcast: Optional[str] = None,
+    region: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Return episodes ordered by most recent, with optional filters."""
+    init_db()
+    sql = "SELECT * FROM episodes WHERE 1=1"
+    params: List[Any] = []
+
+    if search:
+        sql += " AND (episode_title LIKE ? OR podcast_title LIKE ? OR guest LIKE ? OR summary LIKE ?)"
+        like = f"%{search}%"
+        params.extend([like, like, like, like])
+    if sentiment:
+        sql += " AND sentiment = ?"
+        params.append(sentiment)
+    if podcast:
+        sql += " AND podcast_title = ?"
+        params.append(podcast)
+    if region:
+        sql += " AND regions LIKE ?"
+        params.append(f"%{region}%")
+
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+
+def get_episode(episode_id: int) -> Optional[Dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def get_episode_by_title(episode_title: str, podcast_title: str) -> Optional[Dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM episodes WHERE episode_title = ? AND podcast_title = ?",
+            (episode_title, podcast_title),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def delete_episode(episode_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+        conn.commit()
+
+
+def get_distinct_podcasts() -> List[str]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT podcast_title FROM episodes ORDER BY podcast_title"
+        ).fetchall()
+        return [r["podcast_title"] for r in rows if r["podcast_title"]]
+
+
+def get_stats() -> Dict[str, Any]:
+    """Aggregate stats for dashboards."""
+    init_db()
+    with _connect() as conn:
+        total = conn.execute("SELECT COUNT(*) AS n FROM episodes").fetchone()["n"]
+        sentiment_counts = conn.execute("""
+            SELECT sentiment, COUNT(*) AS n FROM episodes
+            WHERE sentiment != '' GROUP BY sentiment
+        """).fetchall()
+        sentiments = {r["sentiment"]: r["n"] for r in sentiment_counts}
+
+        recent_rows = conn.execute("""
+            SELECT created_at, sentiment, bullish_score, bearish_score
+            FROM episodes ORDER BY created_at DESC LIMIT 30
+        """).fetchall()
+        timeline = [dict(r) for r in recent_rows]
+
+    return {
+        "total_episodes": total,
+        "sentiment_breakdown": sentiments,
+        "recent_timeline": timeline,
+    }
+
+
+def migrate_legacy_history() -> int:
+    """One-time migration of the old JSON history file into SQLite."""
+    if not os.path.exists(LEGACY_HISTORY_FILE):
+        return 0
+    try:
+        with open(LEGACY_HISTORY_FILE) as f:
+            entries = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return 0
+
+    init_db()
+    migrated = 0
+    for entry in entries:
+        ep = entry.get("episode_title", "")
+        pod = entry.get("podcast_title", "Unknown")
+        if not ep:
+            continue
+        # Skip if already in DB
+        if get_episode_by_title(ep, pod):
+            continue
+        result = entry.get("full_result", {})
+        # Try to reconstruct insights from result if not stored
+        save_episode(ep, pod, result, em_insights=None)
+        migrated += 1
+    return migrated

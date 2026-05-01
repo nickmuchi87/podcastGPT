@@ -31,6 +31,9 @@ except (ImportError, OSError):
     PYDUB_AVAILABLE = False
     AudioSegment = None
 
+# Local persistence layer (SQLite-backed)
+from core import database as db
+
 # ============================================================================
 # Model Routing
 # ============================================================================
@@ -303,7 +306,24 @@ def init_session_state():
         st.session_state.processed_podcasts = {}
 
     if 'history' not in st.session_state:
-        st.session_state.history = _load_history_from_disk()  # restore from disk
+        # Migrate legacy JSON file to SQLite once on startup
+        try:
+            db.migrate_legacy_history()
+        except Exception:
+            pass
+        # Pull recent episodes from SQLite (preferred), fallback to JSON
+        try:
+            episodes = db.list_episodes(limit=20)
+            st.session_state.history = [{
+                'episode_title': e['episode_title'],
+                'podcast_title': e['podcast_title'],
+                'timestamp': e['created_at'],
+                'summary': (e['summary'] or '')[:200] + '...',
+                'guest': e.get('guest', 'Unknown'),
+                'full_result': e['full_result'],
+            } for e in episodes]
+        except Exception:
+            st.session_state.history = _load_history_from_disk()
 
     if 'current_episodes' not in st.session_state:
         st.session_state.current_episodes = {}
@@ -1285,8 +1305,9 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
     if not result.get('podcast_details'):
         result['podcast_details'] = transcript[:5000] + "..." if len(transcript) > 5000 else transcript
 
-    # Store transcript source metadata
+    # Store transcript source metadata + full transcript for downstream Q&A
     result['_transcript_source'] = transcript_source
+    result['_full_transcript'] = transcript
 
     return result
 
@@ -1428,7 +1449,7 @@ def format_investment_summary(result: Dict[str, Any], em_insights: Dict[str, Any
 
 
 def add_to_history(episode_title: str, podcast_title: str, result: Dict[str, Any]):
-    """Add a processed podcast to history and persist to disk."""
+    """Add a processed podcast to history (SQLite) and session state."""
     history_entry = {
         'episode_title': episode_title,
         'podcast_title': podcast_title,
@@ -1438,9 +1459,21 @@ def add_to_history(episode_title: str, podcast_title: str, result: Dict[str, Any
         'full_result': result
     }
     st.session_state.history.insert(0, history_entry)
-    # Keep only last 20 entries
+    # Keep only last 20 entries in session
     st.session_state.history = st.session_state.history[:20]
-    # Persist to disk so history survives restarts
+    # Persist to SQLite (full transcript + insights for Library page)
+    try:
+        em_insights = extract_em_insights(result)
+        db.save_episode(
+            episode_title=episode_title,
+            podcast_title=podcast_title,
+            result=result,
+            em_insights=em_insights,
+            full_transcript=result.get('_full_transcript', ''),
+        )
+    except Exception:
+        pass  # Non-fatal — keep session history even if DB write fails
+    # Also keep legacy JSON for backwards-compat
     _save_history_to_disk(st.session_state.history)
 
 

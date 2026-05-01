@@ -33,6 +33,23 @@ except (ImportError, OSError):
 
 # Local persistence layer (SQLite-backed)
 from core import database as db
+from core.insights import (
+    EM_REGIONS,
+    EM_ASSET_CLASSES,
+    format_highlights,
+    extract_em_insights,
+    parse_summary_into_topics,
+    format_topics_as_markdown,
+    format_investment_summary,
+)
+from core.exports import (
+    deliver_to_telegram,
+    generate_markdown_export,
+    generate_research_note,
+    generate_quick_summary,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+)
 
 # ============================================================================
 # Model Routing
@@ -83,34 +100,9 @@ SAMPLE_PODCASTS = {
     "The TWIML AI Podcast":          "https://feeds.megaphone.fm/MLN2155636147",
 }
 
-# EM Regions for analysis
-EM_REGIONS = [
-    "Latin America", "EMEA", "Asia ex-China", "China",
-    "Frontier Markets", "GCC/Middle East", "Eastern Europe"
-]
-
-# Asset classes for EM analysis
-EM_ASSET_CLASSES = [
-    "Hard Currency Sovereigns", "Local Currency Sovereigns",
-    "EM Corporates (IG)", "EM Corporates (HY)",
-    "EM Equities", "EM FX"
-]
-
-# Topic categories for structured summaries
-TOPIC_CATEGORIES = {
-    "Market Outlook": ["outlook", "forecast", "expect", "predict",
-                       str(datetime.now().year), str(datetime.now().year + 1),
-                       "next year", "going forward"],
-    "Monetary Policy": ["rate", "fed", "central bank", "inflation", "interest", "hiking", "cutting", "pause", "pivot"],
-    "Growth & Economy": ["gdp", "growth", "recession", "slowdown", "expansion", "economic", "economy"],
-    "Credit & Fixed Income": ["credit", "bond", "spread", "yield", "duration", "default", "high yield", "investment grade"],
-    "Currencies & FX": ["currency", "dollar", "fx", "depreciation", "appreciation", "exchange rate", "carry"],
-    "Equities": ["stock", "equity", "valuation", "earnings", "p/e", "multiple", "index"],
-    "Geopolitics & Policy": ["election", "political", "government", "regulation", "sanction", "trade war", "tariff"],
-    "China Focus": ["china", "chinese", "beijing", "xi", "property", "evergrande"],
-    "Commodities": ["oil", "commodity", "metal", "gold", "copper", "energy"],
-    "Risk Factors": ["risk", "concern", "worry", "downside", "volatility", "uncertainty"],
-}
+# Constants (EM_REGIONS, EM_ASSET_CLASSES) imported from core.insights above.
+# Topic categories for structured summaries are also defined in core.insights
+# but kept here as a backwards-compat alias for any code that imports it.
 
 # ============================================================================
 # Page Configuration
@@ -544,74 +536,7 @@ def detect_and_process_url(url: str) -> Dict[str, Any]:
     return parse_podcast_feed(url)
 
 
-def parse_summary_into_topics(result: Dict[str, Any]) -> Dict[str, List[str]]:
-    """
-    Parse the podcast summary and details into topic-based bullet points.
-    Returns a dictionary with topic categories as keys and bullet points as values.
-    """
-    summary = result.get('podcast_summary', '')
-    details = result.get('podcast_details', '')
-    highlights = result.get('podcast_highlights', '')
-
-    # Combine all text for analysis
-    full_text = f"{summary} {details}"
-
-    # Split into sentences
-    sentences = re.split(r'(?<=[.!?])\s+', full_text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-
-    # Categorize sentences into topics
-    categorized = {}
-    used_sentences = set()
-
-    for topic, keywords in TOPIC_CATEGORIES.items():
-        topic_sentences = []
-        for i, sentence in enumerate(sentences):
-            if i in used_sentences:
-                continue
-            sentence_lower = sentence.lower()
-            if any(kw in sentence_lower for kw in keywords):
-                # Clean up the sentence
-                clean_sentence = sentence.strip()
-                if clean_sentence and len(clean_sentence) > 30:
-                    topic_sentences.append(clean_sentence)
-                    used_sentences.add(i)
-
-        if topic_sentences:
-            # Limit to top 4 most relevant points per topic
-            categorized[topic] = topic_sentences[:4]
-
-    # Add highlights as "Key Takeaways" if not empty
-    if highlights:
-        highlight_list = [h.strip().lstrip('•-* ') for h in highlights.split('\n') if h.strip()]
-        if highlight_list:
-            categorized["Key Takeaways"] = highlight_list[:6]
-
-    # If we have uncategorized important sentences, add them to "Other Insights"
-    other_sentences = [sentences[i] for i in range(len(sentences))
-                       if i not in used_sentences and len(sentences[i]) > 50][:4]
-    if other_sentences:
-        categorized["Other Insights"] = other_sentences
-
-    return categorized
-
-
-def format_topics_as_markdown(topics: Dict[str, List[str]]) -> str:
-    """Format topic-based summary as markdown."""
-    if not topics:
-        return "No structured topics extracted."
-
-    md_parts = []
-    for topic, points in topics.items():
-        md_parts.append(f"### {topic}")
-        for point in points:
-            # Truncate very long points
-            if len(point) > 300:
-                point = point[:297] + "..."
-            md_parts.append(f"- {point}")
-        md_parts.append("")  # Empty line between sections
-
-    return "\n".join(md_parts)
+# parse_summary_into_topics, format_topics_as_markdown imported from core.insights
 
 
 def get_openai_client() -> Optional[OpenAI]:
@@ -1312,140 +1237,10 @@ def process_podcast(audio_url: str, episode_page_url: Optional[str] = None,
     return result
 
 
-def format_highlights(highlights: str) -> list:
-    """Parse highlights string into a list."""
-    if not highlights:
-        return []
-    return [h.strip() for h in highlights.split('\n') if h.strip()]
+# format_highlights and extract_em_insights imported from core.insights
 
 
-def extract_em_insights(result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract and structure insights from an EM Portfolio Manager perspective.
-    Analyzes the summary and highlights to identify investment-relevant information.
-    """
-    summary = result.get('podcast_summary', '')
-    highlights = result.get('podcast_highlights', '')
-    details = result.get('podcast_details', '')
-    full_text = f"{summary} {highlights} {details}".lower()
-
-    # Regional mentions
-    regions_mentioned = []
-    region_keywords = {
-        "Latin America": ["brazil", "mexico", "argentina", "chile", "colombia", "peru", "latam", "latin america", "south america"],
-        "EMEA": ["turkey", "south africa", "egypt", "nigeria", "poland", "hungary", "czech", "romania", "emea"],
-        "Asia ex-China": ["india", "indonesia", "vietnam", "philippines", "thailand", "malaysia", "korea", "taiwan", "asia"],
-        "China": ["china", "chinese", "beijing", "shanghai", "renminbi", "yuan", "cny"],
-        "Frontier Markets": ["frontier", "kenya", "bangladesh", "sri lanka", "pakistan", "ghana", "zambia"],
-        "GCC/Middle East": ["saudi", "uae", "qatar", "kuwait", "gcc", "middle east", "gulf"],
-        "Eastern Europe": ["russia", "ukraine", "poland", "hungary", "czech", "romania", "eastern europe"],
-    }
-
-    for region, keywords in region_keywords.items():
-        if any(kw in full_text for kw in keywords):
-            regions_mentioned.append(region)
-
-    # Asset class mentions
-    asset_classes_mentioned = []
-    asset_keywords = {
-        "Hard Currency Sovereigns": ["hard currency", "dollar bond", "usd bond", "sovereign debt", "eurobond"],
-        "Local Currency Sovereigns": ["local currency", "local bond", "domestic bond", "local rates"],
-        "EM Corporates": ["corporate bond", "em corporate", "corporate credit", "high yield corporate"],
-        "EM Equities": ["equities", "stocks", "equity market", "stock market"],
-        "EM FX": ["currency", "fx", "foreign exchange", "depreciation", "appreciation"],
-    }
-
-    for asset_class, keywords in asset_keywords.items():
-        if any(kw in full_text for kw in keywords):
-            asset_classes_mentioned.append(asset_class)
-
-    # Sentiment indicators
-    bullish_keywords = ["bullish", "optimistic", "opportunity", "undervalued", "attractive", "upside", "rally", "recovery", "positive"]
-    bearish_keywords = ["bearish", "pessimistic", "risk", "overvalued", "downside", "sell", "decline", "negative", "concern", "worried"]
-
-    bullish_count = sum(1 for kw in bullish_keywords if kw in full_text)
-    bearish_count = sum(1 for kw in bearish_keywords if kw in full_text)
-
-    if bullish_count > bearish_count + 2:
-        sentiment = "Bullish"
-    elif bearish_count > bullish_count + 2:
-        sentiment = "Bearish"
-    else:
-        sentiment = "Neutral/Mixed"
-
-    # Key themes extraction
-    theme_keywords = {
-        "Monetary Policy": ["rate cut", "rate hike", "central bank", "fed", "monetary policy", "inflation"],
-        "Credit Conditions": ["credit", "spread", "default", "restructuring", "npls", "non-performing"],
-        "Growth Outlook": ["gdp", "growth", "recession", "slowdown", "recovery", "expansion"],
-        "Political Risk": ["election", "political", "government", "reform", "policy change"],
-        "External Flows": ["inflows", "outflows", "capital flows", "foreign investment", "fund flows"],
-        "Currency Dynamics": ["currency", "depreciation", "appreciation", "fx", "dollar strength"],
-        "Commodity Impact": ["oil", "commodity", "metals", "energy", "agriculture"],
-        "ESG/Climate": ["esg", "climate", "sustainability", "green", "transition"],
-    }
-
-    themes_identified = []
-    for theme, keywords in theme_keywords.items():
-        if any(kw in full_text for kw in keywords):
-            themes_identified.append(theme)
-
-    # Extract any specific countries/names mentioned
-    country_patterns = [
-        r'\b(brazil|mexico|turkey|india|china|indonesia|south africa|argentina|chile|colombia|poland|hungary|egypt|nigeria|pakistan|vietnam|philippines|thailand|malaysia|romania|czech|saudi|uae|qatar)\b'
-    ]
-
-    countries_mentioned = []
-    for pattern in country_patterns:
-        matches = re.findall(pattern, full_text, re.IGNORECASE)
-        countries_mentioned.extend([m.title() for m in matches])
-    countries_mentioned = list(set(countries_mentioned))[:8]  # Top 8 unique
-
-    return {
-        "regions": regions_mentioned if regions_mentioned else ["Global/Broad EM"],
-        "asset_classes": asset_classes_mentioned if asset_classes_mentioned else ["Multiple"],
-        "sentiment": sentiment,
-        "themes": themes_identified if themes_identified else ["General Market Commentary"],
-        "countries": countries_mentioned,
-        "bullish_score": bullish_count,
-        "bearish_score": bearish_count,
-    }
-
-
-def format_investment_summary(result: Dict[str, Any], em_insights: Dict[str, Any]) -> str:
-    """Format the summary as a structured investment research note."""
-    summary = result.get('podcast_summary', 'No summary available.')
-    highlights = result.get('podcast_highlights', '')
-
-    # Parse highlights into actionable items
-    highlight_items = format_highlights(highlights)
-
-    formatted = f"""
-**Overall Sentiment:** {em_insights['sentiment']}
-
-**Key Investment Themes:**
-{chr(10).join(f"• {theme}" for theme in em_insights['themes'])}
-
-**Regional Focus:**
-{chr(10).join(f"• {region}" for region in em_insights['regions'])}
-
-**Countries Discussed:**
-{', '.join(em_insights['countries']) if em_insights['countries'] else 'Broad EM discussion'}
-
-**Asset Classes Relevant:**
-{chr(10).join(f"• {ac}" for ac in em_insights['asset_classes'])}
-
----
-
-**Executive Summary:**
-{summary}
-
----
-
-**Key Takeaways for Portfolio Positioning:**
-{chr(10).join(f"{i+1}. {h.lstrip('•-* ').strip()}" for i, h in enumerate(highlight_items) if h.strip())}
-"""
-    return formatted
+# extract_em_insights and format_investment_summary imported from core.insights
 
 
 def add_to_history(episode_title: str, podcast_title: str, result: Dict[str, Any]):
@@ -1502,211 +1297,6 @@ def _load_history_from_disk() -> list:
         pass
     return []
 
-
-# ── Telegram Delivery ─────────────────────────────────────────────────────────
-
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "8691576484")
-
-
-def deliver_to_telegram(episode_title: str, result: Dict[str, Any],
-                         em_insights: Dict[str, Any], podcast_title: str = "") -> bool:
-    """
-    Send a compact podcast summary to Telegram.
-    Only fires if TELEGRAM_BOT_TOKEN is set.
-    """
-    if not TELEGRAM_BOT_TOKEN:
-        return False
-
-    guest      = result.get("podcast_guest", "Unknown")
-    guest_org  = result.get("podcast_guest_org", "")
-    sentiment  = em_insights.get("sentiment", "—")
-    regions    = ", ".join(em_insights.get("regions", [])[:3])
-    themes     = ", ".join(em_insights.get("themes", [])[:3])
-    highlights = [h.strip().lstrip("•-* ") for h in
-                  result.get("podcast_highlights", "").split("\n") if h.strip()][:4]
-    bullet_pts = "\n".join(f"• {h}" for h in highlights) or "—"
-    model_used = result.get("_model_used", "—")
-
-    msg = (
-        f"🎙️ *PodcastGPT — New Analysis*\n\n"
-        f"*{episode_title}*\n"
-        f"_{podcast_title}_\n\n"
-        f"👤 *Guest:* {guest}{' | ' + guest_org if guest_org else ''}\n"
-        f"📊 *Sentiment:* {sentiment}\n"
-        f"🌍 *Regions:* {regions or '—'}\n"
-        f"🎯 *Themes:* {themes or '—'}\n\n"
-        f"*Key Takeaways:*\n{bullet_pts}\n\n"
-        f"_Model: {model_used}_"
-    )
-
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        resp = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "parse_mode": "Markdown"
-        }, timeout=10)
-        return resp.status_code == 200
-    except Exception:
-        return False
-
-
-def generate_markdown_export(episode_title: str, result: Dict[str, Any]) -> str:
-    """Generate a markdown export of the podcast summary."""
-    md = f"""# {episode_title}
-
-## Summary
-{result.get('podcast_summary', 'No summary available.')}
-
-## Guest Information
-- **Name:** {result.get('podcast_guest', 'Unknown')}
-- **Title:** {result.get('podcast_guest_title', 'N/A')}
-- **Organization:** {result.get('podcast_guest_org', 'N/A')}
-
-## Key Highlights
-{result.get('podcast_highlights', 'No highlights available.')}
-
----
-*Generated by PodcastGPT on {datetime.now().strftime('%Y-%m-%d %H:%M')}*
-"""
-    return md
-
-
-def generate_research_note(episode_title: str, result: Dict[str, Any],
-                           em_insights: Dict[str, Any], episode_info: Optional[Dict] = None,
-                           topic_breakdown: Optional[Dict[str, List[str]]] = None) -> str:
-    """Generate a professional EM research note format with topic breakdown."""
-    guest_name = result.get('podcast_guest', 'Unknown')
-    guest_title = result.get('podcast_guest_title', '')
-    guest_org = result.get('podcast_guest_org', '')
-    podcast_title = episode_info.get('podcast_title', 'Podcast') if episode_info else 'Podcast'
-
-    highlights = format_highlights(result.get('podcast_highlights', ''))
-    takeaways = '\n'.join(f"{i+1}. {h.lstrip('•-* ').strip()}"
-                          for i, h in enumerate(highlights) if h.strip())
-
-    # Format topic breakdown
-    topic_section = ""
-    if topic_breakdown:
-        topic_parts = []
-        for topic, points in topic_breakdown.items():
-            topic_parts.append(f"### {topic}")
-            for point in points[:4]:  # Limit to 4 points per topic
-                clean_point = point[:200] + "..." if len(point) > 200 else point
-                topic_parts.append(f"- {clean_point}")
-            topic_parts.append("")
-        topic_section = "\n".join(topic_parts)
-    else:
-        topic_section = "No structured topics extracted."
-
-    note = f"""# EM Research Note: Podcast Summary
-## {episode_title}
-
-**Source:** {podcast_title}
-**Date:** {datetime.now().strftime('%Y-%m-%d')}
-**Analyst:** PodcastGPT AI
-
----
-
-## QUICK REFERENCE
-
-| Metric | Value |
-|--------|-------|
-| **Overall Sentiment** | {em_insights['sentiment']} |
-| **Primary Regions** | {', '.join(em_insights['regions'])} |
-| **Countries Discussed** | {', '.join(em_insights['countries']) if em_insights['countries'] else 'Broad EM'} |
-| **Asset Classes** | {', '.join(em_insights['asset_classes'])} |
-| **Key Themes** | {', '.join(em_insights['themes'])} |
-
----
-
-## GUEST PROFILE
-
-**{guest_name}**
-{guest_title}
-{guest_org}
-
----
-
-## EXECUTIVE SUMMARY
-
-{result.get('podcast_summary', 'No summary available.')}
-
----
-
-## DETAILED TOPIC BREAKDOWN
-
-{topic_section}
-
----
-
-## KEY INVESTMENT THEMES
-
-{chr(10).join(f"### {theme}" for theme in em_insights['themes'])}
-
----
-
-## ACTIONABLE TAKEAWAYS
-
-{takeaways if takeaways else 'No specific takeaways extracted.'}
-
----
-
-## REGIONAL BREAKDOWN
-
-{chr(10).join(f"- **{region}**: Discussed in this episode" for region in em_insights['regions'])}
-
----
-
-## RISK CONSIDERATIONS
-
-Based on the discussion, portfolio managers should consider:
-- Sentiment indicators suggest a **{em_insights['sentiment'].lower()}** bias
-- Focus areas: {', '.join(em_insights['themes'][:3])}
-- Geographic exposure: {', '.join(em_insights['countries'][:5]) if em_insights['countries'] else 'Broad EM exposure'}
-
----
-
-## APPENDIX: SENTIMENT ANALYSIS
-
-- Bullish signals detected: {em_insights['bullish_score']}
-- Bearish signals detected: {em_insights['bearish_score']}
-- Net sentiment: {'Positive' if em_insights['bullish_score'] > em_insights['bearish_score'] else 'Negative' if em_insights['bearish_score'] > em_insights['bullish_score'] else 'Neutral'}
-
----
-
-*This research note was automatically generated by PodcastGPT on {datetime.now().strftime('%Y-%m-%d %H:%M')}*
-*For internal use only. Not investment advice.*
-"""
-    return note
-
-
-def generate_quick_summary(episode_title: str, result: Dict[str, Any],
-                           em_insights: Dict[str, Any]) -> str:
-    """Generate a quick summary suitable for email/slack."""
-    highlights = format_highlights(result.get('podcast_highlights', ''))
-    takeaways = '\n'.join(f"  - {h.lstrip('•-* ').strip()}"
-                          for h in highlights[:5] if h.strip())
-
-    summary = f"""EM PODCAST SUMMARY: {episode_title}
-
-SENTIMENT: {em_insights['sentiment']}
-REGIONS: {', '.join(em_insights['regions'])}
-THEMES: {', '.join(em_insights['themes'][:4])}
-
-GUEST: {result.get('podcast_guest', 'Unknown')} ({result.get('podcast_guest_org', 'N/A')})
-
-KEY POINTS:
-{takeaways}
-
-BOTTOM LINE:
-{result.get('podcast_summary', 'No summary available.')[:500]}...
-
----
-Generated by PodcastGPT | {datetime.now().strftime('%Y-%m-%d')}
-"""
-    return summary
 
 
 # ============================================================================

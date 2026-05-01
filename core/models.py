@@ -70,7 +70,7 @@ MODELS: List[ModelSpec] = [
         speed=5,
     ),
     ModelSpec(
-        name="Gemini 3 Flash",
+        name="Gemini 2.5 Flash",
         provider="gemini",
         model_id="gemini-2.5-flash-preview-04-17",
         cost_in=0.30, cost_out=2.50,

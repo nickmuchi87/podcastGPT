@@ -231,6 +231,53 @@ def get_stats() -> Dict[str, Any]:
     }
 
 
+def get_aggregate_counts() -> Dict[str, Dict[str, int]]:
+    """Count occurrences of each region/theme/country/asset_class across all episodes."""
+    init_db()
+    counts = {"regions": {}, "themes": {}, "countries": {}, "asset_classes": {}}
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT regions, themes, countries, asset_classes FROM episodes"
+        ).fetchall()
+    for r in rows:
+        for key in counts:
+            try:
+                items = json.loads(r[key] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                items = []
+            for item in items:
+                counts[key][item] = counts[key].get(item, 0) + 1
+    return counts
+
+
+def get_model_usage() -> Dict[str, int]:
+    """Count episodes processed per model."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT model_used, COUNT(*) AS n FROM episodes
+            WHERE model_used != '' GROUP BY model_used ORDER BY n DESC
+        """).fetchall()
+        return {r["model_used"]: r["n"] for r in rows}
+
+
+def get_total_estimated_cost() -> float:
+    """Sum of _estimated_cost across all stored episodes (parses full_result JSON)."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute("SELECT full_result FROM episodes").fetchall()
+    total = 0.0
+    for r in rows:
+        try:
+            d = json.loads(r["full_result"] or "{}")
+            v = d.get("_estimated_cost")
+            if isinstance(v, (int, float)):
+                total += float(v)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return total
+
+
 def migrate_legacy_history() -> int:
     """One-time migration of the old JSON history file into SQLite."""
     if not os.path.exists(LEGACY_HISTORY_FILE):

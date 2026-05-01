@@ -1665,91 +1665,62 @@ def render_results(episode_title: str, result: Dict[str, Any], episode_info: Opt
 
 
 def render_home():
-    """Render the home/welcome screen with EM focus."""
-    st.markdown("### 👋 Welcome to PodcastGPT for EM Portfolio Managers")
+    """Render the home/welcome screen — quick start + recent activity."""
+    # Show recent activity if user has analyzed episodes before
+    total = db.get_stats()["total_episodes"]
 
-    st.markdown("""
-    Transform hours of macro and EM podcast content into **structured, actionable investment insights** in minutes.
+    if total > 0:
+        # Returning-user flow: show snapshot and direct to dashboard
+        c1, c2, c3 = st.columns([2, 1, 1])
+        with c1:
+            st.markdown("### 👋 Welcome back")
+            st.caption(f"You have **{total}** analyzed episode{'s' if total != 1 else ''} in your library.")
+        with c2:
+            st.metric("Episodes", total)
+        with c3:
+            sentiments = db.get_stats()["sentiment_breakdown"]
+            net = sentiments.get("Bullish", 0) - sentiments.get("Bearish", 0)
+            st.metric("Net Bias", f"{net:+d}")
 
-    **Built for EM Portfolio Managers who need to:**
-    - Stay on top of market commentary from key voices
-    - Quickly extract regional views and sentiment
-    - Identify investment themes and catalysts
-    - Generate research notes for team distribution
-    """)
+        st.markdown("---")
+        st.markdown("##### 🆕 Most Recent")
+        for e in db.list_episodes(limit=3):
+            st.markdown(
+                f'• **{e["episode_title"][:80]}** &nbsp; <span style="color:#888">— '
+                f'{e["podcast_title"]} · {e.get("sentiment", "—")}</span>',
+                unsafe_allow_html=True,
+            )
 
-    # Quick stats - EM focused
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
+        st.markdown("---")
+        st.info(
+            "👈 **Process a new episode** via the sidebar, or visit "
+            "**📊 Dashboard**, **📚 Library**, **⚖️ Compare**, or **💬 Q&A** "
+            "from the page selector."
+        )
+    else:
+        # First-time user flow
+        st.markdown("### 👋 Welcome to PodcastGPT for EM Portfolio Managers")
         st.markdown("""
-        <div class="metric-card">
-            <h2>🌍</h2>
-            <p>Regional Analysis</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown("""
-        <div class="metric-card">
-            <h2>📊</h2>
-            <p>Sentiment Detection</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        st.markdown("""
-        <div class="metric-card">
-            <h2>💼</h2>
-            <p>Asset Class Tags</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col4:
-        st.markdown("""
-        <div class="metric-card">
-            <h2>📝</h2>
-            <p>Research Notes</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # EM-specific features
-    st.markdown("### 📈 EM-Focused Features")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("""
-        **Investment Analysis:**
-        - Automatic sentiment scoring (Bullish/Bearish/Neutral)
-        - Regional focus detection (LatAm, EMEA, Asia, etc.)
-        - Country-specific mentions extraction
-        - Asset class relevance tagging
+Transform hours of macro and EM podcast content into **structured, actionable
+investment insights** in minutes.
         """)
 
-    with col2:
-        st.markdown("""
-        **Professional Output:**
-        - Structured research note format
-        - Quick summary for email/Slack
-        - Investment theme identification
-        - Actionable takeaways extraction
-        """)
+        st.markdown("##### What you can do:")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown("**📊 Dashboard**\n\nKPIs + sentiment trends across all episodes")
+        with c2:
+            st.markdown("**📚 Library**\n\nSearchable archive with filters")
+        with c3:
+            st.markdown("**⚖️ Compare**\n\nDiff two episodes side-by-side")
+        with c4:
+            st.markdown("**💬 Q&A**\n\nChat with any analyzed transcript")
 
-    st.markdown("---")
-
-    # Sample podcasts showcase
-    st.markdown("### 🎧 Pre-loaded EM & Macro Podcasts")
-
-    podcast_cols = st.columns(len(SAMPLE_PODCASTS))
-    for i, (name, _) in enumerate(SAMPLE_PODCASTS.items()):
-        with podcast_cols[i]:
-            st.markdown(f"**{name.split('(')[0].strip()}**")
-
-    st.markdown("---")
-    st.info("👈 **Get started:** Select a podcast from the sidebar and fetch episodes!")
+        st.markdown("---")
+        st.info(
+            "👈 **Get started:** Pick a podcast and fetch episodes. "
+            "Try Demo Mode for an instant walkthrough."
+        )
 
 
 def render_processing_screen():

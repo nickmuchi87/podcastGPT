@@ -115,10 +115,10 @@ MODELS: List[ModelSpec] = [
         name="Claude Haiku 4.5",
         provider="anthropic",
         model_id="claude-haiku-4-5-20251001",
-        cost_in=0.80, cost_out=4.0,
+        cost_in=1.0, cost_out=5.0,
         context_window=200_000,
-        tier=2, quality_score=78,
-        tasks=("summary", "qa", "classification"),
+        tier=2, quality_score=82,
+        tasks=("summary", "qa", "classification", "batch", "long_context"),
         speed=5,
     ),
 

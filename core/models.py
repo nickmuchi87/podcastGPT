@@ -58,9 +58,9 @@ class ModelSpec:
 
 
 MODELS: List[ModelSpec] = [
-    # ── Gemini (huge context, Flash-Lite is the cheapest option) ────────
+    # ── Gemini (huge context, Flash Lite is the cheapest option) ────────
     ModelSpec(
-        name="Gemini 2.5 Flash-Lite",
+        name="Gemini 3.1 Flash Lite",
         provider="gemini",
         model_id="gemini-2.5-flash-lite",
         cost_in=0.10, cost_out=0.40,
@@ -70,7 +70,7 @@ MODELS: List[ModelSpec] = [
         speed=5,
     ),
     ModelSpec(
-        name="Gemini 2.5 Flash",
+        name="Gemini 3 Flash",
         provider="gemini",
         model_id="gemini-2.5-flash-preview-04-17",
         cost_in=0.30, cost_out=2.50,
@@ -80,7 +80,7 @@ MODELS: List[ModelSpec] = [
         speed=5,
     ),
     ModelSpec(
-        name="Gemini 2.5 Pro",
+        name="Gemini 3.1 Pro",
         provider="gemini",
         model_id="gemini-2.5-pro-preview-03-25",
         cost_in=1.25, cost_out=10.0,

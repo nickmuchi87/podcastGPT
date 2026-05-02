@@ -51,6 +51,8 @@ def init_db() -> None:
                 bearish_score INTEGER DEFAULT 0,
                 full_result TEXT,     -- JSON of full result dict
                 created_at TEXT NOT NULL,
+                user_notes TEXT DEFAULT '',
+                tags TEXT DEFAULT '[]',  -- JSON array of strings
                 UNIQUE(episode_title, podcast_title)
             );
 
@@ -85,6 +87,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
         """)
+
+        # Idempotent column adds for existing DBs that pre-date these fields
+        for col, ddl in [
+            ("user_notes", "ALTER TABLE episodes ADD COLUMN user_notes TEXT DEFAULT ''"),
+            ("tags", "ALTER TABLE episodes ADD COLUMN tags TEXT DEFAULT '[]'"),
+        ]:
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass  # already exists
+
         conn.commit()
 
 
@@ -155,7 +168,7 @@ def save_episode(
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
-    for key in ("regions", "themes", "countries", "asset_classes"):
+    for key in ("regions", "themes", "countries", "asset_classes", "tags"):
         try:
             d[key] = json.loads(d.get(key) or "[]")
         except (json.JSONDecodeError, TypeError):
@@ -164,6 +177,8 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         d["full_result"] = json.loads(d.get("full_result") or "{}")
     except (json.JSONDecodeError, TypeError):
         d["full_result"] = {}
+    if d.get("user_notes") is None:
+        d["user_notes"] = ""
     return d
 
 
@@ -172,6 +187,7 @@ def list_episodes(
     sentiment: Optional[str] = None,
     podcast: Optional[str] = None,
     region: Optional[str] = None,
+    tag: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     """Return episodes ordered by most recent, with optional filters."""
@@ -180,9 +196,9 @@ def list_episodes(
     params: List[Any] = []
 
     if search:
-        sql += " AND (episode_title LIKE ? OR podcast_title LIKE ? OR guest LIKE ? OR summary LIKE ?)"
+        sql += " AND (episode_title LIKE ? OR podcast_title LIKE ? OR guest LIKE ? OR summary LIKE ? OR user_notes LIKE ?)"
         like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.extend([like, like, like, like, like])
     if sentiment:
         sql += " AND sentiment = ?"
         params.append(sentiment)
@@ -192,6 +208,9 @@ def list_episodes(
     if region:
         sql += " AND regions LIKE ?"
         params.append(f"%{region}%")
+    if tag:
+        sql += " AND tags LIKE ?"
+        params.append(f'%"{tag}"%')
 
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
@@ -199,6 +218,44 @@ def list_episodes(
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
+
+
+def set_episode_note(episode_id: int, note: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE episodes SET user_notes = ? WHERE id = ?",
+            (note, episode_id),
+        )
+        conn.commit()
+
+
+def set_episode_tags(episode_id: int, tags: List[str]) -> None:
+    """Replace the tag list for an episode."""
+    init_db()
+    cleaned = sorted(set(t.strip() for t in tags if t.strip()))
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE episodes SET tags = ? WHERE id = ?",
+            (json.dumps(cleaned), episode_id),
+        )
+        conn.commit()
+
+
+def list_distinct_tags() -> List[str]:
+    """Return all unique tags used across episodes."""
+    init_db()
+    seen = set()
+    with _connect() as conn:
+        rows = conn.execute("SELECT tags FROM episodes WHERE tags IS NOT NULL").fetchall()
+    for r in rows:
+        try:
+            for t in json.loads(r["tags"] or "[]"):
+                if isinstance(t, str) and t.strip():
+                    seen.add(t.strip())
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return sorted(seen)
 
 
 def get_episode(episode_id: int) -> Optional[Dict[str, Any]]:

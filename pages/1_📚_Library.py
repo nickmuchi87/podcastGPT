@@ -46,6 +46,8 @@ st.markdown("""
     .pill-bear { background: #f8d7da; color: #721c24; }
     .pill-neutral { background: #fff3cd; color: #856404; }
     .pill-region { background: #e8eaf6; color: #3f51b5; }
+    .pill-tag { background: #fef3c7; color: #92400e; }
+    .has-notes { color: #16a34a; font-size: 0.75rem; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -94,9 +96,12 @@ st.markdown("---")
 
 # ── Filters ────────────────────────────────────────────────────────────
 with st.container():
-    f1, f2, f3, f4 = st.columns([3, 1.5, 2, 1.5])
+    f1, f2, f3 = st.columns([3, 1.5, 1.5])
     with f1:
-        search = st.text_input("🔍 Search", placeholder="Title, guest, summary…")
+        search = st.text_input(
+            "🔍 Search",
+            placeholder="Title, guest, summary, or your notes…",
+        )
     with f2:
         sentiment_filter = st.selectbox(
             "Sentiment", ["All", "Bullish", "Bearish", "Neutral/Mixed"]
@@ -104,10 +109,15 @@ with st.container():
     with f3:
         podcasts = ["All"] + db.get_distinct_podcasts()
         podcast_filter = st.selectbox("Podcast", podcasts)
+
+    f4, f5 = st.columns(2)
     with f4:
         regions = ["All", "Latin America", "EMEA", "Asia ex-China", "China",
                    "Frontier Markets", "GCC/Middle East", "Eastern Europe"]
         region_filter = st.selectbox("Region", regions)
+    with f5:
+        all_tags = db.list_distinct_tags()
+        tag_filter = st.selectbox("Tag", ["All"] + all_tags) if all_tags else "All"
 
 # Build filter args
 filters = {
@@ -115,6 +125,7 @@ filters = {
     "sentiment": None if sentiment_filter == "All" else sentiment_filter,
     "podcast": None if podcast_filter == "All" else podcast_filter,
     "region": None if region_filter == "All" else region_filter,
+    "tag": None if tag_filter == "All" else tag_filter,
 }
 episodes = db.list_episodes(**filters)
 
@@ -144,13 +155,18 @@ for ep in episodes:
     guest = ep.get("guest", "Unknown")
     sentiment = ep.get("sentiment", "—")
     regions_list = ep.get("regions", [])[:3]
-    themes_list = ep.get("themes", [])[:3]
+    tags_list = ep.get("tags", [])
+    notes = ep.get("user_notes", "") or ""
     summary = (ep.get("summary") or "")[:240]
     when = _format_timestamp(ep.get("created_at", ""))
 
     region_pills = "".join(
         f'<span class="pill pill-region">{r}</span>' for r in regions_list
     )
+    tag_pills = "".join(
+        f'<span class="pill pill-tag">🏷️ {t}</span>' for t in tags_list
+    )
+    notes_indicator = '<span class="has-notes">📝 has notes</span>' if notes else ''
 
     with st.container():
         col_main, col_actions = st.columns([5, 1])
@@ -160,15 +176,43 @@ for ep in episodes:
                 <div style="font-weight:600; font-size:1.05rem;">{title}</div>
                 <div class="episode-meta">
                     🎙️ {podcast} &nbsp; · &nbsp; 👤 {guest} &nbsp; · &nbsp; 🕒 {when}
+                    &nbsp; {notes_indicator}
                 </div>
                 <div style="margin-top: 0.5rem;">
-                    {sentiment_pill(sentiment)} {region_pills}
+                    {sentiment_pill(sentiment)} {region_pills} {tag_pills}
                 </div>
                 <div style="margin-top: 0.5rem; color: #444; font-size: 0.9rem;">
                     {summary}{'…' if len(summary) >= 240 else ''}
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # Notes / tags editor (collapsed by default)
+            with st.expander("📝 Notes & tags", expanded=False):
+                new_notes = st.text_area(
+                    "Your notes",
+                    value=notes,
+                    placeholder="Add your own thoughts, conclusions, follow-ups…",
+                    key=f"notes_{ep['id']}",
+                    height=120,
+                )
+                new_tags_str = st.text_input(
+                    "Tags (comma-separated)",
+                    value=", ".join(tags_list),
+                    placeholder="e.g., bullish, india, q1-2026",
+                    key=f"tags_{ep['id']}",
+                )
+                save_col, _ = st.columns([1, 4])
+                with save_col:
+                    if st.button("💾 Save", key=f"save_{ep['id']}", use_container_width=True):
+                        if new_notes != notes:
+                            db.set_episode_note(ep["id"], new_notes)
+                        new_tags_list = [t.strip() for t in new_tags_str.split(",")]
+                        if sorted(set(t for t in new_tags_list if t)) != sorted(set(tags_list)):
+                            db.set_episode_tags(ep["id"], new_tags_list)
+                        st.toast("Saved!")
+                        st.rerun()
+
         with col_actions:
             st.write("")
             if st.button("View", key=f"view_{ep['id']}", use_container_width=True):

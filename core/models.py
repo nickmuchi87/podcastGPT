@@ -659,6 +659,102 @@ Use markdown formatting. Cite specific episodes when making claims.
         return (f"{model.name} error: {e}", model)
 
 
+def stream_chat_with_transcript(
+    transcript: str,
+    question: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    priority: str = "balanced",
+):
+    """
+    Streaming version of chat_with_transcript. Yields (chunk, model_used).
+    The first yield is ("", model) so the caller knows which model was picked.
+    Subsequent yields are (text_chunk, model).
+    """
+    history = history or []
+    model = select_model(
+        task="qa", transcript_chars=len(transcript), priority=priority
+    )
+    if model is None:
+        yield ("No AI provider available. Set one of OPENAI_API_KEY, "
+               "ANTHROPIC_API_KEY, GEMINI_API_KEY, or DEEPSEEK_API_KEY."), None
+        return
+
+    system = (
+        "You are an EM (Emerging Markets) Portfolio Manager research assistant. "
+        "Answer questions strictly using the provided podcast transcript. "
+        "If the transcript doesn't cover a question, say so. Be concise but "
+        "specific. Quote short passages from the transcript when relevant."
+    )
+
+    max_chars = max(20_000, model.context_window * 3 - 5_000)
+    transcript = transcript[:max_chars]
+
+    try:
+        if model.provider == "gemini":
+            api_key = _provider_key("gemini")
+            genai.configure(api_key=api_key)
+            m = genai.GenerativeModel(model.model_id, system_instruction=system)
+            convo = m.start_chat(history=[
+                {"role": "user", "parts": [f"<transcript>\n{transcript}\n</transcript>"]},
+                {"role": "model", "parts": ["Got it — ask me anything about this transcript."]},
+                *[{"role": ("user" if h["role"] == "user" else "model"),
+                    "parts": [h["content"]]} for h in history[-6:]],
+            ])
+            resp = convo.send_message(question, stream=True)
+            for chunk in resp:
+                if chunk.text:
+                    yield chunk.text, model
+            return
+
+        if model.provider == "anthropic":
+            api_key = _provider_key("anthropic")
+            client = anthropic.Anthropic(api_key=api_key)
+            messages = [
+                {"role": "user", "content": f"<transcript>\n{transcript}\n</transcript>"},
+                {"role": "assistant", "content": "Got it — ask away."},
+            ]
+            for turn in history[-6:]:
+                messages.append({"role": turn["role"], "content": turn["content"]})
+            messages.append({"role": "user", "content": question})
+            with client.messages.stream(
+                model=model.model_id,
+                max_tokens=1024,
+                system=system,
+                messages=messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    yield text, model
+            return
+
+        # OpenAI / DeepSeek
+        api_key = _provider_key(model.provider)
+        kwargs = {"api_key": api_key}
+        if model.provider == "deepseek":
+            kwargs["base_url"] = "https://api.deepseek.com"
+        client = OpenAIClient(**kwargs)
+        msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Podcast transcript:\n\n{transcript}"},
+        ]
+        for turn in history[-6:]:
+            msgs.append({"role": turn["role"], "content": turn["content"]})
+        msgs.append({"role": "user", "content": question})
+        resp = client.chat.completions.create(
+            model=model.model_id,
+            messages=msgs,
+            max_tokens=800,
+            temperature=0.2,
+            stream=True,
+        )
+        for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content, model
+
+    except Exception as e:
+        yield f"{model.name} error: {e}", model
+
+
 def list_available_models(priority: str = "balanced") -> List[Dict[str, Any]]:
     """Return models sorted by score (for UI display)."""
     avail = available_providers()

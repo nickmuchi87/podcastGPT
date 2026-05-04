@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -250,6 +250,50 @@ with col_r:
             f'</div>',
             unsafe_allow_html=True,
         )
+
+st.markdown("---")
+
+# ── Cost tracking ──────────────────────────────────────────────────────
+st.markdown("### 💰 Cost Tracking")
+
+cost_breakdown = db.get_cost_breakdown()
+cost_by_model = db.get_cost_by_model()
+
+if cost_breakdown and any(r["cost"] > 0 for r in cost_breakdown):
+    cost_col1, cost_col2 = st.columns(2)
+
+    with cost_col1:
+        st.markdown("**Spend by Model**")
+        sorted_models = sorted(cost_by_model.items(), key=lambda x: -x[1])
+        for model_name, model_cost in sorted_models:
+            if model_cost > 0:
+                pct = model_cost / total_cost if total_cost > 0 else 0
+                st.markdown(f"**{model_name}** — ${model_cost:.4f}")
+                st.progress(min(pct, 1.0))
+
+    with cost_col2:
+        st.markdown("**Spend Over Time**")
+        cost_by_date: Dict[str, float] = {}
+        for row in reversed(cost_breakdown):
+            d = row["date"]
+            cost_by_date[d] = cost_by_date.get(d, 0) + row["cost"]
+        if cost_by_date:
+            cumulative = 0.0
+            cum_data = []
+            for d, c in cost_by_date.items():
+                cumulative += c
+                cum_data.append({"Date": d, "Cumulative $": round(cumulative, 4)})
+            st.line_chart(pd.DataFrame(cum_data).set_index("Date"), height=220)
+
+    with st.expander("📋 Per-episode cost log", expanded=False):
+        for row in cost_breakdown[:20]:
+            if row["cost"] > 0:
+                st.markdown(
+                    f"- **{row['episode_title'][:60]}** — "
+                    f"${row['cost']:.4f} via {row['model']} ({row['date']})"
+                )
+else:
+    st.caption("No cost data yet — costs are tracked automatically when episodes are analyzed.")
 
 st.markdown("---")
 st.caption(

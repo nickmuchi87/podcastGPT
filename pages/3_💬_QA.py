@@ -131,19 +131,34 @@ if question:
     st.session_state[hist_key].append({"role": "user", "content": question})
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking…"):
-            answer, model_used = model_router.chat_with_transcript(
+        full_answer = ""
+        model_used = None
+        placeholder = st.empty()
+        try:
+            for chunk, model in model_router.stream_chat_with_transcript(
                 transcript=transcript,
                 question=question,
-                history=st.session_state[hist_key][:-1],  # exclude just-added user msg
+                history=st.session_state[hist_key][:-1],
+                priority=st.session_state["routing_priority"],
+            ):
+                model_used = model
+                full_answer += chunk
+                placeholder.markdown(full_answer + "▌")
+            placeholder.markdown(full_answer)
+        except Exception:
+            # Fallback to non-streaming if streaming fails
+            full_answer, model_used = model_router.chat_with_transcript(
+                transcript=transcript,
+                question=question,
+                history=st.session_state[hist_key][:-1],
                 priority=st.session_state["routing_priority"],
             )
-        st.markdown(answer)
+            placeholder.markdown(full_answer)
         if model_used:
             st.caption(f"_via {model_used.name}_")
 
     st.session_state[hist_key].append({
         "role": "assistant",
-        "content": answer,
+        "content": full_answer,
         "model": model_used.name if model_used else None,
     })

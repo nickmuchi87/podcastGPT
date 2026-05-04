@@ -13,9 +13,9 @@ podcastGPT/
 ├── core/                      # Pure-logic modules (no Streamlit deps unless noted)
 │   ├── database.py            # SQLite persistence (episodes / watchlist / alerts)
 │   ├── models.py              # Smart router across Claude/GPT/Gemini/DeepSeek
-│   ├── transcript.py          # Online transcript discovery (Listen Notes / web)
+│   ├── transcript.py          # Transcript discovery (YouTube / Listen Notes / web)
 │   ├── insights.py            # EM extraction (sentiment, regions, themes, countries)
-│   └── exports.py             # Markdown / research note / Telegram delivery
+│   └── exports.py             # Markdown / HTML / PDF / Telegram delivery
 ├── pages/                     # Streamlit auto-discovers; ordered by file prefix
 │   ├── 0_📊_Dashboard.py      # KPIs + sentiment trend + corpus stats
 │   ├── 1_📚_Library.py        # Searchable archive (search, filters, tags, notes)
@@ -38,8 +38,8 @@ podcastGPT/
 **Manual processing** (Streamlit UI):
 1. User picks RSS feed → `parse_podcast_feed` (cached)
 2. User selects episode → `process_podcast(audio_url, link, podcast, episode)`
-3. `core.transcript.find_transcript()` runs 4-step search:
-   Listen Notes URL → episode webpage → Listen Notes auto-search → web search
+3. `core.transcript.find_transcript()` runs 6-step search:
+   YouTube URL → Listen Notes URL → episode webpage → Listen Notes auto-search → YouTube search → web search
 4. If no online transcript: download audio → Whisper transcription
 5. `core.models.generate_summary()` smart-routes to best LLM
 6. `core.insights.extract_em_insights()` runs keyword/sentiment extraction
@@ -135,6 +135,12 @@ Required env: at least one provider API key. Optional: `TELEGRAM_BOT_TOKEN`,
   without online transcripts
 - **`_provider_key` checks both env vars AND `st.session_state`** — that's how
   sidebar API key inputs work
+- **YouTube transcript extraction** uses the timedtext XML API (no pip dep),
+  preferring English manual captions over auto-generated ones
+- **PDF export uses weasyprint** (optional) — falls back to self-contained
+  HTML download if weasyprint isn't installed
+- **Q&A streaming** — `stream_chat_with_transcript()` yields chunks; all 4
+  providers support streaming. Falls back to non-streaming on error
 
 ## When adding a feature
 

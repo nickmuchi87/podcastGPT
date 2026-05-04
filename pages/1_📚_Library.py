@@ -18,6 +18,8 @@ from typing import Any, Dict, List
 import streamlit as st
 
 from core import database as db
+from core.exports import generate_pdf_research_note, generate_html_research_note, generate_research_note
+from core.insights import extract_em_insights
 
 st.set_page_config(page_title="Library — PodcastGPT", page_icon="📚", layout="wide")
 
@@ -220,6 +222,22 @@ for ep in episodes:
                 st.session_state["last_result"] = ep["full_result"]
                 st.session_state["selected_episode"] = title
                 st.success("Loaded! Switch to the main page to see full analysis.")
+
+            # Export button
+            ep_insights = extract_em_insights(ep.get("full_result", {}))
+            pdf_bytes = generate_pdf_research_note(title, ep.get("full_result", {}), ep_insights, podcast)
+            if pdf_bytes:
+                st.download_button(
+                    "📄 PDF", data=pdf_bytes, file_name=f"research_note_{ep['id']}.pdf",
+                    mime="application/pdf", key=f"pdf_{ep['id']}", use_container_width=True,
+                )
+            else:
+                html_note = generate_html_research_note(title, ep.get("full_result", {}), ep_insights, podcast)
+                st.download_button(
+                    "📄 Export", data=html_note, file_name=f"research_note_{ep['id']}.html",
+                    mime="text/html", key=f"html_{ep['id']}", use_container_width=True,
+                )
+
             if st.button("Delete", key=f"del_{ep['id']}", use_container_width=True):
                 db.delete_episode(ep["id"])
                 st.rerun()

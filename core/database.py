@@ -550,6 +550,43 @@ def evaluate_alerts_for_episode(
     return matched
 
 
+def get_cost_breakdown() -> List[Dict[str, Any]]:
+    """Per-episode cost data for the Dashboard cost tracking pane."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, episode_title, podcast_title, model_used, full_result, created_at "
+            "FROM episodes ORDER BY created_at DESC"
+        ).fetchall()
+    results = []
+    for r in rows:
+        try:
+            d = json.loads(r["full_result"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            d = {}
+        cost = d.get("_estimated_cost")
+        if not isinstance(cost, (int, float)):
+            cost = 0.0
+        results.append({
+            "episode_title": r["episode_title"],
+            "podcast_title": r["podcast_title"],
+            "model": r["model_used"] or "unknown",
+            "cost": float(cost),
+            "date": (r["created_at"] or "")[:10],
+        })
+    return results
+
+
+def get_cost_by_model() -> Dict[str, float]:
+    """Total estimated cost grouped by model."""
+    breakdown = get_cost_breakdown()
+    by_model: Dict[str, float] = {}
+    for row in breakdown:
+        m = row["model"] or "unknown"
+        by_model[m] = by_model.get(m, 0) + row["cost"]
+    return by_model
+
+
 def migrate_legacy_history() -> int:
     """One-time migration of the old JSON history file into SQLite."""
     if not os.path.exists(LEGACY_HISTORY_FILE):
